@@ -1,0 +1,497 @@
+/* ==========================================================================
+   PatchMind IDE - VS Code Inspired QSS Theme (Dark)
+   ========================================================================== */
+
+/* --- Palette (Conceptual Variables) --- */
+/* --vscode-bg-deep: #1e1e1e;        /* Deepest background (Activity Bar maybe) */
+/* --vscode-bg-medium: #252526;      /* Main background (Editor, Sidebars) */
+/* --vscode-bg-light: #333333;       /* Lighter background (Hover effects, inactive elements) */
+/* --vscode-surface: #3C3C3C;       /* Input fields, Button backgrounds */
+/* --vscode-border-subtle: #383838;  /* Subtle borders around inputs, panels */
+/* --vscode-border-contrast: #444444; /* Slightly more visible border */
+/* --vscode-border-focus: #007ACC;   /* Accent blue for focus rings */
+/* --vscode-text-primary: #CCCCCC;    /* Primary text (light gray) */
+/* --vscode-text-secondary: #888888; /* Dimmer text (placeholders, metadata) */
+/* --vscode-text-disabled: #666666;  /* Disabled text */
+/* --vscode-accent-blue: #007ACC;    /* Primary accent */
+/* --vscode-accent-blue-hover: #1f8ad2; /* Lighter blue for hover */
+/* --vscode-accent-blue-active: #0065a9; /* Darker blue for pressed */
+/* --vscode-list-hover-bg: #2A2D2E;   /* List/Tree item hover */
+/* --vscode-list-selection-bg: #094771; /* List/Tree item selection background (dark blue) */
+/* --vscode-list-selection-text: #FFFFFF; /* Text color for selected list items */
+/* --vscode-scrollbar-handle: #4D4D4D; /* Scrollbar handle */
+/* --vscode-scrollbar-handle-hover: #686868; /* Scrollbar handle hover */
+/* --vscode-tab-active-border: #007ACC;  /* Top border for active tab */
+/* --vscode-error-red: #F44747;      /* Error indication */
+/* --vscode-warning-yellow: #CCA700; /* Warning indication */
+/* --vscode-info-blue: #3794FF;     /* Info indication */
+/* --vscode-success-green: #4CAF50;  /* Success indication */
+/* --------------------------------------- */
+
+/* --- Global Styles --- */
+QWidget {
+    background-color: #252526; /* bg-medium */
+    color: #CCCCCC; /* text-primary */
+    font-family: "Inter", "Noto Sans", "Segoe UI", sans-serif; /* Consistent font */
+    font-size: 10pt; /* VS Code often uses slightly smaller fonts */
+    border: none; /* Remove default borders */
+}
+
+QMainWindow::separator {
+    /* Style splitter handles */
+    background-color: #383838; /* border-subtle */
+    width: 1px;
+    height: 1px;
+    border: none;
+}
+QMainWindow::separator:hover {
+    background-color: #007ACC; /* accent-blue */
+}
+
+QSplitter::handle {
+    background-color: #383838; /* border-subtle */
+    border: none;
+}
+QSplitter::handle:horizontal {
+    width: 1px;
+}
+QSplitter::handle:vertical {
+    height: 1px;
+}
+QSplitter::handle:hover {
+    background-color: #007ACC; /* accent-blue */
+}
+
+
+/* --- Input Widgets --- */
+QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {
+    background-color: #3C3C3C; /* surface */
+    color: #CCCCCC; /* text-primary */
+    border: 1px solid #383838; /* border-subtle */
+    border-radius: 3px;
+    padding: 4px 6px;
+    selection-background-color: #094771; /* list-selection-bg */
+    selection-color: #FFFFFF; /* list-selection-text */
+}
+
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
+    border: 1px solid #007ACC; /* border-focus */
+    outline: none; /* Disable default outline */
+}
+
+QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {
+    background-color: #2D2D2D; /* Lighter shade of medium bg */
+    color: #666666; /* text-disabled */
+    border-color: #303030;
+}
+
+QTextEdit, QPlainTextEdit {
+    padding: 6px; /* More padding for text areas */
+}
+
+/* Placeholder text */
+QLineEdit::placeholder, QTextEdit::placeholder, QPlainTextEdit::placeholder {
+    color: #888888; /* text-secondary */
+}
+
+/* ComboBox Arrow */
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 18px;
+    border-left: 1px solid #383838; /* border-subtle */
+    border-top-right-radius: 3px;
+    border-bottom-right-radius: 3px;
+}
+QComboBox::down-arrow {
+    image: url(:/qt-project.org/styles/commonstyle/images/downarraow-16.png); /* Use default arrow, may need qtawesome */
+    width: 10px;
+    height: 10px;
+}
+QComboBox::down-arrow:disabled {
+    image: url(:/qt-project.org/styles/commonstyle/images/downarraow-disabled-16.png);
+}
+/* ComboBox Popup List */
+QComboBox QAbstractItemView {
+    background-color: #252526; /* bg-medium */
+    border: 1px solid #444444; /* border-contrast */
+    selection-background-color: #094771; /* list-selection-bg */
+    selection-color: #FFFFFF; /* list-selection-text */
+    padding: 2px;
+    outline: none;
+}
+
+
+/* --- Buttons --- */
+QPushButton {
+    background-color: #3C3C3C; /* surface */
+    color: #CCCCCC; /* text-primary */
+    border: 1px solid #383838; /* border-subtle */
+    border-radius: 3px;
+    padding: 6px 12px;
+    min-height: 18px; /* Ensure minimum height */
+    min-width: 40px;
+}
+QPushButton:hover {
+    background-color: #4a4a4a; /* Slightly lighter surface */
+    border-color: #444444; /* border-contrast */
+}
+QPushButton:pressed {
+    background-color: #0065a9; /* accent-blue-active */
+    border-color: #007ACC; /* accent-blue */
+    color: #FFFFFF;
+}
+QPushButton:disabled {
+    background-color: #2D2D2D;
+    color: #666666; /* text-disabled */
+    border-color: #303030;
+}
+QPushButton:focus {
+    /* Optional: Add focus ring like inputs */
+    border: 1px solid #007ACC; /* border-focus */
+    outline: none;
+}
+
+/* Primary action button style (e.g., Send) */
+QPushButton#send_btn { /* Assuming your send button has objectName 'send_btn' */
+    background-color: #007ACC; /* accent-blue */
+    color: #FFFFFF;
+    font-weight: bold;
+    border: 1px solid #0065a9; /* accent-blue-active */
+}
+QPushButton#send_btn:hover {
+    background-color: #1f8ad2; /* accent-blue-hover */
+    border-color: #007ACC;
+}
+QPushButton#send_btn:pressed {
+    background-color: #005c9a; /* Even darker */
+}
+QPushButton#send_btn:disabled {
+    background-color: #004a75; /* Very dark blue disabled */
+    border-color: #003e60;
+    color: #CCCCCC; /* Keep text lightish */
+    opacity: 0.6; /* Add opacity for disabled */
+}
+
+/* Tool Buttons (often smaller, maybe icon only) */
+QToolButton {
+    background-color: transparent; /* Often transparent background */
+    border: 1px solid transparent;
+    border-radius: 3px;
+    padding: 4px; /* Adjust padding for icons */
+    margin: 1px;
+}
+QToolButton:hover {
+    background-color: #333333; /* bg-light */
+    border-color: #383838; /* border-subtle */
+}
+QToolButton:pressed {
+    background-color: #0065a9; /* accent-blue-active */
+    border-color: #007ACC; /* accent-blue */
+}
+QToolButton:checked { /* For toggle buttons */
+    background-color: #094771; /* list-selection-bg */
+    border-color: #007ACC; /* border-focus */
+}
+QToolButton:disabled {
+    background-color: transparent;
+    opacity: 0.5;
+}
+
+/* --- Item Views (Lists, Trees, Tables) --- */
+QListView, QTreeView, QTableView {
+    background-color: #252526; /* bg-medium */
+    border: 1px solid #383838; /* border-subtle */
+    alternate-background-color: #2a2a2b; /* Very subtle alternation */
+    outline: none; /* Disable focus rect */
+}
+
+QListView::item, QTreeView::item, QTableView::item {
+    padding: 4px 6px;
+    border-radius: 2px; /* Slight rounding */
+    color: #CCCCCC; /* text-primary */
+}
+
+QListView::item:hover, QTreeView::item:hover, QTableView::item:hover {
+    background-color: #2A2D2E; /* list-hover-bg */
+}
+
+QListView::item:selected, QTreeView::item:selected, QTableView::item:selected {
+    background-color: #094771; /* list-selection-bg */
+    color: #FFFFFF; /* list-selection-text */
+}
+
+/* Tree View Branch Indicators */
+QTreeView::branch {
+    background: transparent;
+}
+QTreeView::branch:has-children:!has-siblings:closed,
+QTreeView::branch:closed:has-children:has-siblings {
+    border-image: none;
+    image: url(:/qt-project.org/styles/commonstyle/images/right-arrow-16.png); /* Needs resource path */
+}
+QTreeView::branch:open:has-children:!has-siblings,
+QTreeView::branch:open:has-children:has-siblings {
+    border-image: none;
+    image: url(:/qt-project.org/styles/commonstyle/images/down-arrow-16.png); /* Needs resource path */
+}
+/* Consider using qtawesome icons here for better results */
+
+/* Header (for Tables/Trees) */
+QHeaderView::section {
+    background-color: #333333; /* bg-light */
+    color: #CCCCCC; /* text-primary */
+    padding: 4px;
+    border: 1px solid #383838; /* border-subtle */
+    border-bottom: 1px solid #444444; /* border-contrast */
+    font-weight: bold;
+}
+
+
+/* --- Tabs --- */
+QTabWidget::pane {
+    border: 1px solid #383838; /* border-subtle */
+    border-top: none; /* Pane border only on sides/bottom */
+}
+
+QTabBar {
+    border: none; /* Remove border around the tab bar itself */
+}
+
+QTabBar::tab {
+    background-color: #252526; /* bg-medium */
+    color: #888888; /* text-secondary (inactive tabs are dimmer) */
+    border: 1px solid #383838; /* border-subtle */
+    border-bottom: none; /* No bottom border for tabs */
+    border-top-left-radius: 3px;
+    border-top-right-radius: 3px;
+    padding: 6px 10px;
+    margin-right: 1px;
+    min-width: 80px; /* Give tabs some width */
+}
+
+QTabBar::tab:hover {
+    background-color: #333333; /* bg-light */
+    color: #CCCCCC; /* text-primary */
+}
+
+QTabBar::tab:selected {
+    background-color: #252526; /* bg-medium (same as editor pane) */
+    color: #FFFFFF; /* Brighter text for active tab */
+    border-color: #383838; /* border-subtle */
+    border-top: 2px solid #007ACC; /* vscode-tab-active-border */
+    /* Make bottom border blend with pane */
+    margin-bottom: -1px; /* Pull tab down slightly */
+}
+
+/* Style the tab close button */
+QTabBar::close-button {
+    /* image: url(...); */ /* Use an icon */
+    subcontrol-position: right;
+    padding: 2px;
+    border-radius: 2px;
+}
+QTabBar::close-button:hover {
+    background-color: #4a4a4a;
+}
+
+
+/* --- Scrollbars --- */
+QScrollBar:vertical, QScrollBar:horizontal {
+    background-color: #252526; /* bg-medium */
+    border: none;
+    width: 8px; /* Thin scrollbars */
+    height: 8px;
+    margin: 0px;
+}
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+    background-color: #4D4D4D; /* scrollbar-handle */
+    border-radius: 4px;
+    min-height: 20px;
+    min-width: 20px;
+}
+QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {
+    background-color: #686868; /* scrollbar-handle-hover */
+}
+QScrollBar::add-line, QScrollBar::sub-line {
+    /* Hide scrollbar arrows */
+    border: none;
+    background: none;
+    width: 0px;
+    height: 0px;
+}
+QScrollBar::add-page, QScrollBar::sub-page {
+    background: none;
+}
+
+/* --- Menu Bar & Menus --- */
+QMenuBar {
+    background-color: #333333; /* bg-light (menu bar often slightly different) */
+    color: #CCCCCC; /* text-primary */
+    border-bottom: 1px solid #383838; /* border-subtle */
+}
+QMenuBar::item {
+    background-color: transparent;
+    padding: 4px 8px;
+}
+QMenuBar::item:selected { /* Hover/select state */
+    background-color: #4a4a4a;
+}
+QMenuBar::item:pressed {
+    background-color: #094771; /* list-selection-bg */
+}
+
+QMenu {
+    background-color: #252526; /* bg-medium */
+    border: 1px solid #444444; /* border-contrast */
+    padding: 4px 0; /* Padding top/bottom */
+}
+QMenu::item {
+    color: #CCCCCC; /* text-primary */
+    padding: 6px 20px; /* More padding inside menu items */
+}
+QMenu::item:selected {
+    background-color: #007ACC; /* accent-blue */
+    color: #FFFFFF; /* list-selection-text */
+}
+QMenu::item:disabled {
+    color: #666666; /* text-disabled */
+    background-color: transparent;
+}
+QMenu::separator {
+    height: 1px;
+    background-color: #383838; /* border-subtle */
+    margin: 4px 0px;
+}
+QMenu::icon {
+    padding-left: 5px; /* Space for icons */
+}
+
+/* --- Status Bar --- */
+QStatusBar {
+    background-color: #007ACC; /* VSCode often has blue status bar */
+    color: #FFFFFF;
+    border-top: 1px solid #0065a9; /* accent-blue-active */
+    font-size: 9pt; /* Slightly smaller font */
+}
+QStatusBar QLabel { /* Ensure labels in status bar inherit color */
+    color: #FFFFFF;
+    background-color: transparent;
+    padding: 0 5px;
+}
+QStatusBar::item {
+    border: none; /* Remove default sunken look */
+}
+
+/* --- Dock Widgets --- */
+QDockWidget {
+    /* Title bar styling is often platform-dependent, but we can try */
+    titlebar-close-icon: url(:/qt-project.org/styles/commonstyle/images/closedock-16.png);
+    titlebar-normal-icon: url(:/qt-project.org/styles/commonstyle/images/undock-16.png);
+}
+QDockWidget::title {
+    background-color: #333333; /* bg-light */
+    text-align: left;
+    padding: 5px;
+    border-bottom: 1px solid #383838; /* border-subtle */
+    font-weight: bold;
+}
+/* The actual content area of the dock widget inherits QWidget style */
+
+
+/* --- Group Box --- */
+QGroupBox {
+    background-color: transparent; /* Group box background often transparent */
+    border: 1px solid #444444; /* border-contrast */
+    border-radius: 4px;
+    margin-top: 10px; /* Space above the group */
+    padding: 15px 8px 8px 8px; /* Top padding makes space for title */
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    padding: 0 5px;
+    margin-left: 10px;
+    color: #CCCCCC; /* text-primary */
+    font-weight: bold;
+    background-color: #252526; /* Same as main background to "cut" the border */
+}
+
+/* --- CheckBox & RadioButton --- */
+QCheckBox, QRadioButton {
+    color: #CCCCCC; /* text-primary */
+    background-color: transparent;
+    padding: 2px;
+}
+QCheckBox::indicator, QRadioButton::indicator {
+    width: 14px;
+    height: 14px;
+    border: 1px solid #444444; /* border-contrast */
+    border-radius: 3px;
+    background-color: #3C3C3C; /* surface */
+}
+QRadioButton::indicator {
+    border-radius: 7px; /* Make radio buttons round */
+}
+QCheckBox::indicator:hover, QRadioButton::indicator:hover {
+    border-color: #007ACC; /* border-focus */
+}
+QCheckBox::indicator:checked, QRadioButton::indicator:checked {
+    background-color: #007ACC; /* accent-blue */
+    border-color: #007ACC;
+    /* Optional: Add checkmark/dot using image property */
+    /* image: url(...); */
+}
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {
+    background-color: #2D2D2D;
+    border-color: #303030;
+}
+QCheckBox:disabled, QRadioButton:disabled {
+    color: #666666; /* text-disabled */
+}
+
+/* --- Labels --- */
+QLabel {
+    background-color: transparent; /* Ensure labels don't have odd backgrounds */
+    color: #CCCCCC; /* text-primary */
+    padding: 1px; /* Minimum padding */
+}
+QLabel#errorLabel { /* Example: Style specific labels if needed */
+    color: #F44747; /* error-red */
+    font-weight: bold;
+}
+QLabel:disabled {
+    color: #666666; /* text-disabled */
+}
+
+/* --- Specific Widget Adjustments (Add as needed) --- */
+
+/* Example: Style the chat list specifically if needed */
+QListWidget#chat_list_widget {
+    /* Styles specific to the chat list */
+    border: none; /* VSCode chat often has no border */
+}
+
+/* Example: Style the file tree */
+QTreeWidget#file_tree {
+   border: none; /* Remove border if desired */
+}
+
+/* Example: Style ChatMessageWidget (you might need object names) */
+ChatMessageWidget { /* Assuming class name is selector (might not work) */
+   /* Add padding or margin if needed */
+   /* border-bottom: 1px solid #383838; */ /* Separator line? */
+}
+
+/* Example: Style ConfigDock elements */
+ConfigDock QGroupBox { /* Target GroupBoxes inside ConfigDock */
+    /* Maybe slightly different styling */
+    border: none;
+    padding-top: 10px; /* Less padding if borderless */
+}
+ConfigDock QGroupBox::title {
+     background-color: transparent; /* No background cut if no border */
+     padding: 0 2px; /* Adjust padding */
+     margin-left: 2px;
+}
