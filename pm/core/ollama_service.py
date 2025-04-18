@@ -39,7 +39,7 @@ class OllamaService:
             for chunk in stream:
                 # Correct way to get text from Ollama stream chunk
                 text = chunk.get("message", {}).get("content", "")
-                logger.debug(f"OllamaService yielding chunk content (type={type(text)}, len={len(text)}): {text!r}")
+                #logger.debug(f"OllamaService yielding chunk content (type={type(text)}, len={len(text)}): {text!r}")
                 if text: # Only yield if there's content
                     #logger.debug(f"Ollama service yielding chunk {count}: {text!r}")
                     yield text

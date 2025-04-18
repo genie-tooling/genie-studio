@@ -88,3 +88,6 @@
 - [ ] Test file manager CRUD ops
 - [ ] Test configuration load/save accuracy
 - [ ] Add QTest-based UI integration tests (edit/save/stream)
+
+Notes:
+The tree view does not show hidden (.file) files. We should surface any extensions/dirs/nice-to-be-able-tochange things that are being excluded in an 'advanced' section of the settings. Give me a plan for this.
