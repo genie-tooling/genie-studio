@@ -260,11 +260,40 @@ class WorkspaceManager(QObject):
             text = editor.toPlainText()
             current_path.write_text(text, encoding='utf-8')
             logger.info(f'WorkspaceManager: Saved {current_path}')
+            # Set modified state AFTER saving
+            editor.document().setModified(False)
             self.file_saved.emit(current_path) # Signal success
-             # TODO: Update tab title to remove modification indicator '*'
             return True
         except Exception as e:
             error_msg = f"Could not save file:\n{current_path}\n\nError: {e}"
+            logger.error(f"WorkspaceManager: {error_msg}")
+            self.file_operation_error.emit(error_msg)
+            return False
+
+    # --- ADDED METHOD for Change Queue ---
+    def save_tab_content_directly(self, file_path: Path, content: str) -> bool:
+        """Saves the given content directly to the specified file path."""
+        logger.info(f"WorkspaceManager: Directly saving content to {file_path}")
+        try:
+            # Ensure parent directory exists (optional, but good practice)
+            # file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(content, encoding='utf-8')
+            logger.info(f'WorkspaceManager: Saved {file_path}')
+            self.file_saved.emit(file_path) # Signal success
+
+            # If the file is currently open in an editor, update the editor
+            if file_path in self.open_editors:
+                 editor = self.open_editors[file_path]
+                 # Block signals to prevent infinite loops if modificationChanged triggers save
+                 editor.blockSignals(True)
+                 editor.document().setPlainText(content) # Update content
+                 editor.document().setModified(False)    # Mark as unmodified
+                 editor.blockSignals(False)
+                 # Tab title update is handled by WorkspaceActionHandler reacting to file_saved
+
+            return True
+        except Exception as e:
+            error_msg = f"Could not save file:\n{file_path}\n\nError: {e}"
             logger.error(f"WorkspaceManager: {error_msg}")
             self.file_operation_error.emit(error_msg)
             return False
@@ -314,3 +343,4 @@ class WorkspaceManager(QObject):
                 editor.setFont(new_font)
             except Exception as e:
                  logger.error(f"Error applying font to editor for {editor.objectName()}: {e}")
+

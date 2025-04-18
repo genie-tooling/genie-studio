@@ -1,0 +1,62 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: patchmind-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      # Persist Ollama models outside the container
+      - ./ollama_data:/root/.ollama
+    tty: true
+    # If you have NVIDIA GPUs and want Ollama to use them:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1 # Or 'all'
+    #           capabilities: [gpu]
+    restart: unless-stopped
+
+  patchmind-ide:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: patchmind-ide-app
+    depends_on:
+      - ollama
+    # --- GUI Application Setup ---
+    environment:
+      # Pass the host's display environment variable
+      - DISPLAY=${DISPLAY}
+      # Necessary for Qt apps in Docker sometimes
+      - QT_X11_NO_MITSHM=1
+      # Tell the Ollama client inside the container where the service is
+      # Use the service name 'ollama' as the hostname
+      - OLLAMA_HOST=http://ollama:11434
+      # Pass necessary X11 authentication variables (if needed, varies by system)
+      # - XAUTHORITY=${XAUTHORITY:-$HOME/.Xauthority}
+    volumes:
+      # Mount the X11 socket for GUI forwarding
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # Mount the application code for development (changes reflect immediately)
+      # Comment this out if you prefer to use only the code copied during build
+      - .:/app:rw
+      # Mount the configuration/log directory from host to container
+      - ~/.patchmind:/root/.patchmind:rw
+      # Mount X authentication cookie (if needed)
+      # - ${XAUTHORITY:-$HOME/.Xauthority}:${XAUTHORITY:-/root/.Xauthority}:ro
+    # The command to run the application inside the container
+    command: python -m pm
+    # Keep stdin open, necessary for some interactive elements or debugging
+    stdin_open: true
+    # Allocate a pseudo-TTY
+    tty: true
+    # Needs access to host network features for GUI display typically
+    # network_mode: host # Alternative: use default bridge network (as defined)
+
+volumes:
+  ollama_data: {}

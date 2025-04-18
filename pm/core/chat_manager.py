@@ -77,7 +77,7 @@ class ChatManager(QObject):
                   self.message_content_updated.emit(message_id, final_content)
                   logger.debug(f"ChatManager: Finalized AI message {message_id}")
              else:
-                   logger.debug(f"ChatManager: AI message {message_id} final content already set.")
+                   logger.trace(f"ChatManager: AI message {message_id} final content already set.") # Use trace
         else:
              if message_id:
                 logger.warning(f"ChatManager: Could not find AI message {message_id} to finalize.")
@@ -100,12 +100,8 @@ class ChatManager(QObject):
         message = self._find_message_by_id(message_id)
         if message:
             message['content'] = new_content
-            logger.info(
-                f"ChatManager: Updated content for message {message_id}."
-            )
-            # This usually precedes truncation and re-submission, history_changed will be emitted later.
-            # If immediate visual update is needed before truncation, emit here:
-            # self.history_changed.emit()
+            logger.info(f"ChatManager: Updated content for message {message_id}. New content: '{new_content[:50]}...'")
+            # history_changed signal emitted by truncate_history_after or add_ai_placeholder
             return True
         else:
             logger.warning(f"ChatManager: Cannot find message {message_id} to update content.")
@@ -119,7 +115,9 @@ class ChatManager(QObject):
              self.chat_history = self.chat_history[:idx + 1] # Keep the message itself
              logger.info(f"ChatManager: Truncated history *after* message {message_id}. Len: {original_length} -> {len(self.chat_history)}.")
              self.history_truncated.emit()
+             # Ensure history_changed is emitted AFTER list modification
              self.history_changed.emit()
+             logger.debug("ChatManager: Emitted history_truncated and history_changed after truncation.")
         else:
              logger.warning(f"ChatManager: Cannot find message {message_id} to truncate after.")
 

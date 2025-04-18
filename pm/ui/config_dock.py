@@ -11,9 +11,14 @@ import qtawesome as qta
 from loguru import logger
 from typing import List, Dict, Optional, Any
 
+# --- Import Change Queue Widget ---
+from .change_queue_widget import ChangeQueueWidget
+
+
 class ConfigDock(QDockWidget):
     """
-    Dock widget for managing PROJECT-SPECIFIC LLM/RAG/Prompt settings.
+    Dock widget for managing PROJECT-SPECIFIC LLM/RAG/Prompt settings
+    and the new Change Queue.
     Reads merged settings but primarily signals changes for project config.
     """
     # --- LLM Signals ---
@@ -35,6 +40,8 @@ class ConfigDock(QDockWidget):
         super().__init__("Project Configuration", parent) # Renamed title
         self._parent_main_window = parent
         self._all_prompts_cache: List[Dict] = []
+        # --- Add reference for Change Queue ---
+        self.change_queue_widget: ChangeQueueWidget = None
 
         self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
@@ -70,7 +77,7 @@ class ConfigDock(QDockWidget):
         llm_form_layout.addRow("Provider:", self.provider_combo)
 
         self.model_combo = QComboBox()
-        self.model_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.model_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         llm_form_layout.addRow("Model:", self.model_combo)
 
         self.temp_spin = QDoubleSpinBox()
@@ -189,16 +196,24 @@ class ConfigDock(QDockWidget):
         prompt_outer_layout = QVBoxLayout(prompt_group)
         prompt_outer_layout.addWidget(prompt_content_widget)
         prompt_outer_layout.addWidget(self.prompt_management_widget)
-        main_layout.addWidget(prompt_group, 1)
+        main_layout.addWidget(prompt_group) # No stretch factor here
         # --- End Prompt Group Setup ---
 
-        main_layout.addStretch(1)
+        # --- ADD Change Queue Group ---
+        change_queue_group = QGroupBox("Pending File Changes")
+        change_queue_group.setCheckable(False) # Not checkable itself
+        change_queue_layout = QVBoxLayout(change_queue_group)
+        self.change_queue_widget = ChangeQueueWidget() # Instantiate the new widget
+        change_queue_layout.addWidget(self.change_queue_widget)
+        main_layout.addWidget(change_queue_group, 1) # Give it stretch factor 1
+        # ------------------------------
+
+        # main_layout.addStretch(1) # Remove/Reduce stretch if queue is at bottom
         container_widget.setLayout(main_layout)
         self.setWidget(container_widget)
 
         # --- Connect Internal Signals ---
         llm_group.toggled.connect(llm_content_widget.setVisible)
-        # Use the named widget for visibility toggle
         rag_group.toggled.connect(rag_content_widget.setVisible)
         prompt_group.toggled.connect(prompt_content_widget.setVisible)
         prompt_group.toggled.connect(self.prompt_management_widget.setVisible)
@@ -222,6 +237,7 @@ class ConfigDock(QDockWidget):
         # List Double Clicks
         self.available_prompts_list.itemDoubleClicked.connect(self._on_add_prompt)
         self.selected_prompts_list.itemDoubleClicked.connect(self._on_edit_selected_prompt)
+        # Change Queue signals connected externally by handler
 
 
     # --- Internal Slots (Emit Public Signals) ---
@@ -377,6 +393,7 @@ class ConfigDock(QDockWidget):
         rag_content_widget = self.findChild(QWidget, "rag_content_widget")
         if rag_content_widget and rag_content_widget.layout():
              layout = rag_content_widget.layout()
+             # Clear previous widgets safely
              while layout.count():
                   item = layout.takeAt(0)
                   widget = item.widget()
@@ -399,17 +416,18 @@ class ConfigDock(QDockWidget):
                 'rag_arxiv_enabled': "ArXiv", 'rag_google_enabled': "Google", 'rag_bing_enabled': "Bing",
             }
             if rag_content_widget and rag_content_widget.layout():
-                rag_layout = rag_content_widget.layout()
+                rag_layout = rag_content_widget.layout() # Use the existing layout
                 for key, display_name in rag_key_map.items():
-                    if key in settings:
+                    if key in settings: # Check if key exists in *effective* settings
                         checkbox = QCheckBox(display_name)
                         checkbox.setChecked(settings.get(key, False)) # Set based on project settings
                         rag_layout.addWidget(checkbox)
                         self.rag_checkboxes[key] = checkbox
+                        # Use lambda to capture the key correctly for the slot
                         checkbox.toggled.connect(lambda checked, k=key: self._on_rag_toggled(k, checked))
-                        logger.debug(f"  + Recreated RAG checkbox '{key}', Checked: {checkbox.isChecked()}")
+                        logger.trace(f"  + Recreated RAG checkbox '{key}', Checked: {checkbox.isChecked()}")
                     else:
-                        logger.warning(f"  - Skipping RAG checkbox '{key}', not found in settings.")
+                        logger.warning(f"  - Skipping RAG checkbox '{key}', not found in effective settings.")
             else:
                 logger.error("ConfigDock: Cannot recreate RAG checkboxes, container missing.")
 
@@ -492,3 +510,4 @@ class ConfigDock(QDockWidget):
             else:
                  logger.warning(f"ConfigDock: Could not find prompt data for selected ID: {prompt_id}")
         self.selected_prompts_list.blockSignals(False)
+

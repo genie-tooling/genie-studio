@@ -1,9 +1,11 @@
 # pm/handlers/prompt_action_handler.py
 from PySide6.QtCore import QObject, Signal, Slot
-from PySide6.QtWidgets import QMainWindow, QMessageBox # For dialogs
+from PySide6.QtWidgets import QMainWindow, QMessageBox # For dialog parent
 from loguru import logger
 from typing import Optional, List
 
+# --- Updated Imports ---
+from ..core.app_core import AppCore
 from ..core.settings_service import SettingsService
 from ..ui.config_dock import ConfigDock
 # from ..ui.prompt_editor_dialog import PromptEditorDialog # Import when created
@@ -12,13 +14,15 @@ class PromptActionHandler(QObject):
     """Handles interactions related to prompt management in the ConfigDock."""
 
     def __init__(self,
-                 main_window: QMainWindow, # For showing dialogs
-                 settings_service: SettingsService,
-                 config_dock: ConfigDock, # To connect signals from
+                 # --- Dependencies ---
+                 main_window: QMainWindow, # Dialog parent
+                 core: AppCore,
+                 config_dock: ConfigDock, # Direct dependency
                  parent: Optional[QObject] = None):
         super().__init__(parent)
         self._main_window = main_window
-        self._settings_service = settings_service
+        self._core = core
+        self._settings_service: SettingsService = core.settings
         self._config_dock = config_dock
 
         # --- Connect Signals from ConfigDock ---
@@ -28,11 +32,17 @@ class PromptActionHandler(QObject):
         self._config_dock.selected_prompts_changed.connect(self.handle_selected_prompts_changed)
 
         # Connect to SettingsService to update dock when prompts change externally
-        # self._settings_service.prompts_changed.connect(self._update_config_dock_prompts) # Add this signal later
+        # TODO: Add prompts_changed signal to SettingsService if needed
+        # self._settings_service.settings_changed.connect(self._handle_settings_change)
 
         logger.info("PromptActionHandler initialized.")
-        # Initial population (should be handled by MainWindow logic that loads settings)
-        # self._update_config_dock_prompts()
+        # Initial population handled by MainWindow via settings_loaded -> _populate_config_dock
+
+    # TODO: Add slot for settings_changed if dynamic updates are needed
+    # @Slot(str, object)
+    # def _handle_settings_change(self, key: str, value: object):
+    #     if key == 'prompts' or key == 'selected_prompt_ids':
+    #          self._update_config_dock_prompts()
 
     @Slot()
     def handle_new_prompt(self):
@@ -43,19 +53,20 @@ class PromptActionHandler(QObject):
         # if dialog.exec():
         #     prompt_data = dialog.get_prompt_data()
         #     if prompt_data:
-        #         # Add prompt via SettingsService
-        #         # self._settings_service.add_prompt(prompt_data)
-        #         logger.info(f"TODO: Add new prompt: {prompt_data['name']}")
-        #         QMessageBox.information(self._main_window, "Not Implemented", "Adding new prompts is not fully implemented yet.")
-        QMessageBox.information(self._main_window, "Not Implemented", "Creating new prompts requires PromptEditorDialog.")
+        #         if self._settings_service.add_prompt(prompt_data): # Assuming add_prompt method exists
+        #             logger.info(f"Added new prompt: {prompt_data['name']}")
+        #             # SettingsService should emit signal to update dock
+        #         else:
+        #             QMessageBox.warning(self._main_window, "Error", "Failed to add new prompt.")
+        QMessageBox.information(self._main_window, "Not Implemented", "Creating new prompts requires PromptEditorDialog and SettingsService integration.")
 
 
     @Slot(str)
     def handle_edit_prompt(self, prompt_id: str):
         """Handles the request to edit an existing prompt."""
         logger.debug(f"Edit prompt requested for ID: {prompt_id}")
-        # TODO: Implement PromptEditorDialog
-        # prompt_data = self._settings_service.get_prompt_by_id(prompt_id)
+        # TODO: Implement PromptEditorDialog & SettingsService methods
+        # prompt_data = self._settings_service.get_prompt_by_id(prompt_id) # Assuming method exists
         # if not prompt_data:
         #     QMessageBox.warning(self._main_window, "Error", f"Prompt with ID {prompt_id} not found.")
         #     return
@@ -63,11 +74,12 @@ class PromptActionHandler(QObject):
         # if dialog.exec():
         #     updated_data = dialog.get_prompt_data()
         #     if updated_data:
-        #         # Update prompt via SettingsService
-        #         # self._settings_service.update_prompt(prompt_id, updated_data)
-        #         logger.info(f"TODO: Update prompt {prompt_id}: {updated_data['name']}")
-        #         QMessageBox.information(self._main_window, "Not Implemented", "Editing prompts is not fully implemented yet.")
-        QMessageBox.information(self._main_window, "Not Implemented", "Editing prompts requires PromptEditorDialog.")
+        #         if self._settings_service.update_prompt(prompt_id, updated_data): # Assuming method exists
+        #             logger.info(f"Updated prompt {prompt_id}: {updated_data['name']}")
+        #             # SettingsService should emit signal to update dock
+        #         else:
+        #             QMessageBox.warning(self._main_window, "Error", "Failed to update prompt.")
+        QMessageBox.information(self._main_window, "Not Implemented", "Editing prompts requires PromptEditorDialog and SettingsService integration.")
 
     @Slot(list)
     def handle_delete_prompt(self, prompt_ids: List[str]):
@@ -78,13 +90,17 @@ class PromptActionHandler(QObject):
 
         # TODO: Implement prompt deletion in SettingsService
         # deleted_count = 0
+        # errors = []
         # for prompt_id in prompt_ids:
-        #     if self._settings_service.delete_prompt(prompt_id):
+        #     if self._settings_service.delete_prompt(prompt_id): # Assuming method exists
         #         deleted_count += 1
-        # logger.info(f"TODO: Deleted {deleted_count} of {len(prompt_ids)} requested prompts.")
-        # if deleted_count < len(prompt_ids):
-        #      QMessageBox.warning(self._main_window, "Deletion Issue", f"Could not delete {len(prompt_ids) - deleted_count} prompts.")
-        QMessageBox.information(self._main_window, "Not Implemented", f"Deleting {len(prompt_ids)} prompts is not fully implemented yet.")
+        #     else:
+        #         errors.append(prompt_id)
+        # logger.info(f"Deleted {deleted_count} of {len(prompt_ids)} prompts.")
+        # if errors:
+        #      QMessageBox.warning(self._main_window, "Deletion Issue", f"Could not delete prompts: {', '.join(errors)}")
+        # # SettingsService should emit signal to update dock
+        QMessageBox.information(self._main_window, "Not Implemented", f"Deleting {len(prompt_ids)} prompts requires SettingsService integration.")
 
 
     @Slot(list)
@@ -94,16 +110,16 @@ class PromptActionHandler(QObject):
         # Update the setting via SettingsService
         # Use a specific key for the ordered list of active prompt IDs
         self._settings_service.set_setting('selected_prompt_ids', selected_ids)
-        logger.info(f"Set selected_prompt_ids in settings: {selected_ids}")
+        # SettingsService emits settings_changed signal automatically
 
 
-    # TODO: Slot connected to SettingsService signal when prompts definition changes
-    # @Slot()
-    # def _update_config_dock_prompts(self):
-    #     """Refreshes the prompt lists in ConfigDock based on SettingsService."""
-    #     logger.debug("Updating ConfigDock prompt lists from SettingsService...")
-    #     all_prompts = self._settings_service.get_all_prompts() # Need method in SettingsService
-    #     selected_ids = self._settings_service.get_setting('selected_prompt_ids', [])
-    #     self._config_dock.populate_available_prompts(all_prompts)
-    #     self._config_dock.populate_selected_prompts(selected_ids, all_prompts)
+    # This method is called by MainWindow when settings are reloaded
+    @Slot()
+    def update_config_dock_prompts(self):
+        """Refreshes the prompt lists in ConfigDock based on SettingsService."""
+        logger.debug("PromptActionHandler: Updating ConfigDock prompt lists...")
+        all_prompts = self._settings_service.get_setting('prompts', []) # Get from settings
+        selected_ids = self._settings_service.get_setting('selected_prompt_ids', [])
+        self._config_dock.populate_available_prompts(all_prompts)
+        self._config_dock.populate_selected_prompts(selected_ids, all_prompts)
 

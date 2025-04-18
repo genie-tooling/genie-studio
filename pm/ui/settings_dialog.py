@@ -12,12 +12,12 @@ from loguru import logger
 import qtawesome as qta
 from typing import List, Dict, Optional, Any
 import re
+import json # Added for prompt list validation
 
 # --- Local Imports ---
 from ..core.settings_service import SettingsService
 from ..core.project_config import (AVAILABLE_RAG_MODELS, DEFAULT_CONFIG,
-                                   DEFAULT_PROMPT_TEMPLATE, AVAILABLE_PYGMENTS_STYLES,
-                                   DEFAULT_STYLE)
+                                   AVAILABLE_PYGMENTS_STYLES, DEFAULT_STYLE)
 
 # ==========================================================================
 # Settings Dialog Class (Refactored)
@@ -55,7 +55,7 @@ class SettingsDialog(QDialog):
         self.tab_widget.addTab(self._create_rag_defaults_tab(), "RAG Defaults")
         self.tab_widget.addTab(self._create_features_tab(), "Features")
         self.tab_widget.addTab(self._create_appearance_tab(), "Appearance")
-        # Prompts tab removed as it's read-only and less critical here
+        self.tab_widget.addTab(self._create_prompts_tab(), "User Prompts") # Add prompts tab
 
         # --- Dialog Buttons ---
         self.button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -97,12 +97,17 @@ class SettingsDialog(QDialog):
         # --- Features ---
         self.feature_patch_cb = QCheckBox("Enable Patch Mode (Apply diffs)"); self.feature_patch_cb.setObjectName("feature_patch_cb")
         self.feature_whole_diff_cb = QCheckBox("Generate Whole-file Diffs (if patch disabled)"); self.feature_whole_diff_cb.setObjectName("feature_whole_diff_cb")
+        self.feature_disable_critic_cb = QCheckBox("Disable Critic Workflow (Direct Execution)"); self.feature_disable_critic_cb.setObjectName("feature_disable_critic_cb"); self.feature_disable_critic_cb.setToolTip("Bypass Plan/Critic steps, go directly to Executor model.") # <<< NEW
 
         # --- Appearance ---
         self.appearance_font_combo = QFontComboBox(); self.appearance_font_combo.setObjectName("appearance_font_combo")
         self.appearance_font_size_spin = QSpinBox(); self.appearance_font_size_spin.setObjectName("appearance_font_size_spin")
         self.appearance_theme_combo = QComboBox(); self.appearance_theme_combo.setObjectName("appearance_theme_combo")
         self.appearance_style_combo = QComboBox(); self.appearance_style_combo.setObjectName("appearance_style_combo")
+
+        # --- Prompts Tab ---
+        self.user_prompts_edit = QTextEdit(); self.user_prompts_edit.setObjectName("user_prompts_edit"); self.user_prompts_edit.setAcceptRichText(False); self.user_prompts_edit.setPlaceholderText("Enter user prompts as a JSON list of objects: [{'id': 'uuid', 'name': 'Prompt Name', 'content': 'Prompt text...'}, ...]")
+
         logger.debug("SettingsDialog: Widgets created.")
 
     # --- Tab Creation Methods ---
@@ -141,6 +146,11 @@ class SettingsDialog(QDialog):
         patch_layout.addWidget(self.feature_patch_cb)
         patch_layout.addWidget(self.feature_whole_diff_cb)
         layout.addWidget(patch_group)
+
+        workflow_group = QGroupBox("LLM Workflow"); workflow_layout = QVBoxLayout(workflow_group) # <<< NEW GROUP
+        workflow_layout.addWidget(self.feature_disable_critic_cb) # <<< ADD CHECKBOX
+        layout.addWidget(workflow_group) # <<< ADD GROUP
+
         layout.addStretch(1)
         return tab
 
@@ -153,6 +163,14 @@ class SettingsDialog(QDialog):
         if AVAILABLE_PYGMENTS_STYLES: self.appearance_style_combo.addItems(AVAILABLE_PYGMENTS_STYLES)
         else: self.appearance_style_combo.addItem("Pygments not found"); self.appearance_style_combo.setEnabled(False)
         layout.addRow("Syntax Style:", self.appearance_style_combo)
+        return tab
+
+    def _create_prompts_tab(self) -> QWidget:
+        """Creates the tab for editing user prompts."""
+        tab = QWidget(); layout = QVBoxLayout(tab)
+        layout.addWidget(QLabel("Manage User Prompts (JSON format):"))
+        layout.addWidget(self.user_prompts_edit)
+        layout.addWidget(QLabel("Note: Edits here modify the prompts available in the Config Dock."))
         return tab
 
     # --- Signal Connections ---
@@ -182,6 +200,7 @@ class SettingsDialog(QDialog):
         self.feature_patch_cb.setChecked(s.get_setting('patch_mode', True))
         self.feature_whole_diff_cb.setChecked(s.get_setting('whole_file', True))
         self.feature_whole_diff_cb.setEnabled(self.feature_patch_cb.isChecked())
+        self.feature_disable_critic_cb.setChecked(s.get_setting('disable_critic_workflow', False)) # <<< POPULATE NEW
 
         # Appearance
         try: self.appearance_font_combo.setCurrentFont(QFont(s.get_setting('editor_font', 'Fira Code')))
@@ -193,6 +212,14 @@ class SettingsDialog(QDialog):
             style_index = self.appearance_style_combo.findText(current_style)
             if style_index >= 0: self.appearance_style_combo.setCurrentIndex(style_index)
             else: logger.warning(f"Populate: Style '{current_style}' not in combo, using default."); self.appearance_style_combo.setCurrentText(DEFAULT_STYLE)
+
+        # Prompts Tab
+        user_prompts_list = s.get_setting('user_prompts', [])
+        try:
+            self.user_prompts_edit.setPlainText(json.dumps(user_prompts_list, indent=2))
+        except Exception as e:
+             logger.error(f"Failed to serialize user prompts for display: {e}")
+             self.user_prompts_edit.setPlainText("[] # Error loading prompts")
 
         logger.debug("SettingsDialog: Fields populated.")
 
@@ -230,6 +257,28 @@ class SettingsDialog(QDialog):
         logger.info("SettingsDialog: OK clicked. Saving global settings via SettingsService...")
         s = self._settings_service
 
+        # --- Validate User Prompts JSON ---
+        user_prompts_text = self.user_prompts_edit.toPlainText()
+        parsed_user_prompts = None
+        try:
+            parsed_user_prompts = json.loads(user_prompts_text)
+            if not isinstance(parsed_user_prompts, list):
+                raise ValueError("User prompts must be a JSON list.")
+            # Basic structure validation
+            for i, p in enumerate(parsed_user_prompts):
+                if not isinstance(p, dict) or not all(k in p for k in ['id', 'name', 'content']):
+                     raise ValueError(f"Invalid structure for prompt at index {i}: {p}")
+        except json.JSONDecodeError as e:
+            QMessageBox.warning(self, "Invalid JSON", f"User Prompts contain invalid JSON:\n{e}\n\nPlease correct it before saving.")
+            return # Stop saving
+        except ValueError as e:
+            QMessageBox.warning(self, "Invalid Format", f"Invalid format for User Prompts:\n{e}\n\nPlease ensure it's a list of objects with 'id', 'name', and 'content'.")
+            return # Stop saving
+        except Exception as e:
+             QMessageBox.critical(self, "Error Parsing Prompts", f"An unexpected error occurred parsing user prompts:\n{e}")
+             return # Stop saving
+        # --- End User Prompt Validation ---
+
         try:
             # Define ONLY the settings managed by this dialog
             dialog_settings_map = {
@@ -244,11 +293,13 @@ class SettingsDialog(QDialog):
                 # Features
                 self.feature_patch_cb: 'patch_mode',
                 self.feature_whole_diff_cb: 'whole_file',
+                self.feature_disable_critic_cb: 'disable_critic_workflow', # <<< ADD NEW
                 # Appearance
                 self.appearance_font_combo: 'editor_font',
                 self.appearance_font_size_spin: 'editor_font_size',
                 self.appearance_theme_combo: 'theme',
                 self.appearance_style_combo: 'syntax_highlighting_style'
+                # User Prompts handled separately below
             }
 
             for widget, key in dialog_settings_map.items():
@@ -266,9 +317,11 @@ class SettingsDialog(QDialog):
                 if value is not None: s.set_setting(key, value)
                 else: logger.warning(f"Could not determine value for setting '{key}' from widget {widget.objectName()}")
 
-            # Trigger save in the service. Note: SettingsService.save_settings() might
-            # need enhancement later if we want separate global/project persistent files.
-            # For now, it saves everything merged to the project file.
+            # --- Set validated user prompts ---
+            if parsed_user_prompts is not None:
+                s.set_setting('user_prompts', parsed_user_prompts)
+            # ---------------------------------
+
             if s.save_settings():
                 self.accept()
             else:
