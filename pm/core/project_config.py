@@ -2,8 +2,16 @@
 import json
 from pathlib import Path
 from loguru import logger
-
+from pygments.styles import get_all_styles
 AVAILABLE_RAG_MODELS = [ 'all-MiniLM-L6-v2', 'msmarco-distilbert-base-v4', 'all-mpnet-base-v2', ]
+# --- Get available styles ---
+try:
+    AVAILABLE_PYGMENTS_STYLES = sorted(list(get_all_styles()))
+    DEFAULT_STYLE = 'native' if 'native' in AVAILABLE_PYGMENTS_STYLES else 'default'
+except ImportError:
+    logger.warning("Pygments not installed. Syntax highlighting styles unavailable.")
+    AVAILABLE_PYGMENTS_STYLES = ['default']
+    DEFAULT_STYLE = 'default'
 
 # Define standard placeholders for the prompt template
 DEFAULT_PROMPT_TEMPLATE = """<SYSTEM_PROMPT>
@@ -77,6 +85,7 @@ Search Query:""",
 
     # Appearance
     'editor_font': 'Fira Code', 'editor_font_size': 11, 'theme': 'Dark',
+    'syntax_highlighting_style': DEFAULT_STYLE,
     'last_project_path': str(Path.cwd())
 }
 
@@ -105,6 +114,7 @@ def load_project_config(path: Path) -> dict:
         'rag_google_api_key',
         'rag_google_cse_id', 'rag_bing_api_key', 'rag_summarizer_provider',
         'rag_summarizer_model_name', 'rag_summarizer_prompt_template',
+        'syntax_highlighting_style', # <<< ADD TO VALIDATION
         'editor_font', 'theme', 'last_project_path'
     ]
     for key in str_keys:
@@ -112,6 +122,9 @@ def load_project_config(path: Path) -> dict:
         default_value = DEFAULT_CONFIG.get(key, '')
         config[key] = str(config.get(key, default_value))
 
+    if config['syntax_highlighting_style'] not in AVAILABLE_PYGMENTS_STYLES:
+        logger.warning(f"Configured style '{config['syntax_highlighting_style']}' not found. Using default '{DEFAULT_STYLE}'.")
+        config['syntax_highlighting_style'] = DEFAULT_STYLE
 
     # --- Ensure default template if missing or empty after load ---
     if not config.get('main_prompt_template', '').strip():
@@ -121,7 +134,6 @@ def load_project_config(path: Path) -> dict:
 
     return config
 
-# ... (save_project_config function - ensure it saves the new key) ...
 def save_project_config(path: Path, cfg: dict):
     cfg_path = path / ".patchmind.json";
     if not path.is_dir(): logger.error(f"Save config fail: invalid path {path}"); return
@@ -129,6 +141,10 @@ def save_project_config(path: Path, cfg: dict):
         # Ensure all default keys are present in the saved file
         cfg_to_save = {k: cfg.get(k, v) for k, v in DEFAULT_CONFIG.items()}
         cfg_to_save['last_project_path'] = str(path); # Always update last path
+        # Make sure the saved style is valid before writing
+        if cfg_to_save['syntax_highlighting_style'] not in AVAILABLE_PYGMENTS_STYLES:
+             cfg_to_save['syntax_highlighting_style'] = DEFAULT_STYLE
+
         with open(cfg_path, "w", encoding='utf-8') as f:
             json.dump(cfg_to_save, f, indent=2, ensure_ascii=False)
         logger.info(f"Saved config: {cfg_path}")

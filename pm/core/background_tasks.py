@@ -53,30 +53,90 @@ class Worker(QObject):
 
     # --- Helper Methods for Context Gathering ---
     def _gather_tree_context(self, available_tokens: int) -> tuple[List[str], int]:
-        parts: List[str] = []; tokens_used: int = 0; files_processed: int = 0
+        """Gathers context from checked files using the '#path\ncontent' format."""
+        parts: List[str] = []
+        tokens_used: int = 0
+        files_processed: int = 0
         project_path: Path = self.project_path
-        logger.debug(f"Worker: Gathering Tree context for {len(self.checked_file_paths)} files (Budget: {available_tokens})...")
-        if not self.checked_file_paths: return [], 0
+        logger.debug(f"Worker: Gathering Tree context for {len(self.checked_file_paths)} files (Budget: {available_tokens}). Using '#path' format.")
+
+        if not self.checked_file_paths:
+            return [], 0
+
         for path in self.checked_file_paths:
-            if self._is_interruption_requested(): logger.info("Worker: Stop requested during Tree context gathering."); break
-            if available_tokens <= 0: logger.info("Worker: Token budget reached during Tree context gathering."); break
-            if not path.is_file(): continue
+            if self._is_interruption_requested():
+                logger.info("Worker: Stop requested during Tree context gathering.")
+                break
+            if available_tokens <= 0:
+                logger.info("Worker: Token budget reached during Tree context gathering.")
+                break
+            if not path.is_file():
+                continue
+
             try:
-                text = path.read_text(encoding='utf-8', errors='ignore');
-                if not text: continue
-                try: relative_path_str = str(path.relative_to(project_path))
-                except ValueError: relative_path_str = path.name
-                header = f'### File: {relative_path_str} ###'; footer = '### End File ###'
-                header_tok = count_tokens(header); snippet_tok = count_tokens(text); footer_tok = count_tokens(footer); total_tok = header_tok + snippet_tok + footer_tok
-                if snippet_tok <= 0: continue
-                if total_tok <= available_tokens: parts.append(f'{header}\n{text}\n{footer}'); available_tokens -= total_tok; tokens_used += total_tok; files_processed += 1
+                text = path.read_text(encoding='utf-8', errors='ignore')
+                if not text: # Skip empty files
+                    continue
+
+                try:
+                    # Use relative path from project root for clarity
+                    relative_path_str = str(path.relative_to(project_path))
+                except ValueError:
+                    # If not relative (e.g., outside project?), use name as fallback
+                    relative_path_str = path.name
+
+                # --- Use the new header format ---
+                header = f'#{relative_path_str}'
+                # --- No footer is used in this format ---
+
+                # Calculate tokens for the new format
+                header_tok = count_tokens(header) + 1 # +1 for the newline after header
+                snippet_tok = count_tokens(text)
+                # --- Total tokens without footer ---
+                total_tok = header_tok + snippet_tok
+
+                if snippet_tok <= 0: # Skip if content tokens are zero
+                     continue
+
+                if total_tok <= available_tokens:
+                    # --- Append using the new format ---
+                    parts.append(f'{header}\n{text}')
+                    available_tokens -= total_tok
+                    tokens_used += total_tok
+                    files_processed += 1
                 else:
-                    needed_snippet_tokens = max(0, available_tokens - header_tok - footer_tok - 10)
-                    if needed_snippet_tokens > 0:
-                        ratio = needed_snippet_tokens / snippet_tok if snippet_tok > 0 else 0; cutoff = int(len(text) * ratio); truncated_text = text[:cutoff]; tok = count_tokens(truncated_text); final_total_tok = header_tok + tok + footer_tok
-                        if tok > 0 and final_total_tok <= available_tokens: parts.append(f'{header}\n{truncated_text}\n{footer}'); available_tokens -= final_total_tok; tokens_used += final_total_tok; files_processed += 1; logger.warning(f'Worker: Truncated Tree file {path.name} ({tok} snippet tokens). Rem: {available_tokens}')
-            except OSError as e: logger.warning(f"Worker: OS Error reading Tree file {path}: {e}")
-            except Exception as e: logger.warning(f"Worker: Failed to process Tree file {path}: {e}")
+                    # Truncation logic (needs adjusted token calculation)
+                    # Reserve a few tokens for potential newlines/formatting issues
+                    needed_snippet_tokens = max(0, available_tokens - header_tok - 5)
+
+                    if needed_snippet_tokens > 5: # Only truncate if meaningful space left
+                        ratio = needed_snippet_tokens / snippet_tok if snippet_tok > 0 else 0
+                        # Simple character-based truncation (token-based is harder)
+                        cutoff = int(len(text) * ratio)
+                        truncated_text = text[:cutoff].strip() # Strip trailing whitespace after trunc
+
+                        # Recalculate truncated snippet tokens
+                        tok = count_tokens(truncated_text)
+                        # --- Final total without footer ---
+                        final_total_tok = header_tok + tok
+
+                        if tok > 0 and final_total_tok <= available_tokens:
+                             # --- Append truncated using the new format ---
+                            parts.append(f'{header}\n{truncated_text}')
+                            available_tokens -= final_total_tok
+                            tokens_used += final_total_tok
+                            files_processed += 1
+                            logger.warning(f'Worker: Truncated Tree file {relative_path_str} ({tok} snippet tokens). Rem: {available_tokens}')
+                        # else: # Log if even truncated version doesn't fit
+                            # logger.debug(f"Worker: Skipping Tree file {relative_path_str} - Truncated version too large.")
+                    # else: # Log if no budget left even for header+minimal content
+                         # logger.debug(f"Worker: Skipping Tree file {relative_path_str} - Insufficient token budget for header.")
+
+            except OSError as e:
+                logger.warning(f"Worker: OS Error reading Tree file {path}: {e}")
+            except Exception as e:
+                logger.warning(f"Worker: Failed to process Tree file {path}: {e}")
+
         logger.info(f"Worker: Tree context complete. Added {files_processed} files. Tokens used by tree: {tokens_used}.")
         return parts, tokens_used
 
@@ -183,7 +243,15 @@ class Worker(QObject):
 
         # Format chat history (excluding the last user query which is separate)
         history_str_parts = []
-        limit = len(history) - 1 # Process all messages except the last one (current user query)
+        # Find the index of the last user message correctly
+        last_user_idx = -1
+        for i in range(len(history) - 1, -1, -1):
+            if history[i].get('role') == 'user':
+                 last_user_idx = i
+                 break
+        # Process history *before* the last user message
+        limit = last_user_idx if last_user_idx != -1 else len(history)
+
         for msg in history[:limit]:
             role = msg.get('role', 'System').capitalize()
             content = msg.get('content', '').strip()
@@ -192,40 +260,39 @@ class Worker(QObject):
         history_str = "\n---\n".join(history_str_parts) if history_str_parts else "[No previous conversation]"
 
         # Format context parts
-        code_context_str = "\n\n".join(context_parts.get('code', [])).strip() or "[No relevant code context provided]"
+        # --- JOIN CODE CONTEXT WITH SINGLE NEWLINE ---
+        code_context_str = "\n".join(context_parts.get('code', [])).strip() or "[No relevant code context provided]"
+        # --- JOIN OTHERS WITH DOUBLE NEWLINE (as they are separate sources) ---
         local_context_str = "\n\n".join(context_parts.get('local', [])).strip() or "[No relevant local context provided]"
         remote_context_str = "\n\n".join(context_parts.get('remote', [])).strip() or "[No relevant remote context provided]"
 
-        # *** CORRECTED DICTIONARY DEFINITION ***
         placeholder_values = {
             'system_prompt': system_prompt,
             'chat_history': history_str,
             'code_context': code_context_str,
             'local_context': local_context_str,
             'remote_context': remote_context_str,
-            'user_query': user_query  # The current user query passed in
+            'user_query': user_query
         }
-        # *** END CORRECTION ***
 
         try:
             final_prompt = template.format(**placeholder_values)
-            logger.debug(f"Worker: Prepared final prompt ({count_tokens(final_prompt)} tokens). Preview: '{final_prompt[:100]}...'")
-            return final_prompt.strip()
+            # Ensure no double-newlines were accidentally introduced at the start/end of joined blocks
+            final_prompt = final_prompt.replace('\n\n\n','\n\n').strip()
+            logger.debug(f"Worker: Prepared final prompt ({count_tokens(final_prompt)} tokens). Preview: '{final_prompt[:150]}...'")
+            return final_prompt
         except KeyError as e:
             logger.error(f"Prompt template error: Missing placeholder {e}. Template:\n{template}")
             self.stream_error.emit(f"Prompt template error: Missing {e}")
-            # Use the corrected placeholder_values dict for fallback
             fallback_prompt = f"<SYSTEM_PROMPT>\n{placeholder_values.get('system_prompt', '')}\n</SYSTEM_PROMPT>\n\n<CONTEXT_SOURCES>\nCode:\n{placeholder_values.get('code_context', '')}\nLocal:\n{placeholder_values.get('local_context', '')}\nRemote:\n{placeholder_values.get('remote_context', '')}\n</CONTEXT_SOURCES>\n\n<USER_QUERY>\n{placeholder_values.get('user_query', '')}\n</USER_QUERY>\n\nAssistant Response:"
             logger.warning(f"Using fallback prompt structure due to template KeyError.")
             return fallback_prompt
         except Exception as e:
              logger.exception(f"Error formatting prompt template: {e}")
              self.stream_error.emit(f"Prompt template error: {e}")
-             # Use the corrected placeholder_values dict for fallback
              fallback_prompt = f"<SYSTEM_PROMPT>\n{placeholder_values.get('system_prompt', '')}\n</SYSTEM_PROMPT>\n\n<CONTEXT_SOURCES>\nCode:\n{placeholder_values.get('code_context', '')}\nLocal:\n{placeholder_values.get('local_context', '')}\nRemote:\n{placeholder_values.get('remote_context', '')}\n</CONTEXT_SOURCES>\n\n<USER_QUERY>\n{placeholder_values.get('user_query', '')}\n</USER_QUERY>\n\nAssistant Response:"
              logger.warning(f"Using fallback prompt structure due to general template error.")
              return fallback_prompt
-
 
     # --- Main Processing Method (Slot) ---
     @Slot()
@@ -233,37 +300,39 @@ class Worker(QObject):
         """The main execution logic, called when the worker starts."""
         logger.info("Worker process started.")
         total_tokens_used = 0
-        # Context parts dictionary stores lists of formatted context strings
         context_parts = {'code': [], 'local': [], 'remote': []}
 
         try:
             if self._is_interruption_requested(): return
 
             self.status_update.emit("Preparing...")
-            # Calculate available token budget, reserving some for response/overhead
             max_tokens = self.settings.get('context_limit', DEFAULT_CONFIG['context_limit'])
-            # Ensure max_tokens is valid positive integer
             if not isinstance(max_tokens, int) or max_tokens <= 0:
                  logger.warning(f"Invalid context_limit '{max_tokens}' in settings, using default.")
                  max_tokens = DEFAULT_CONFIG['context_limit']
-            # Reserve space for I/O formatting and the LLM's response itself
-            available_tokens = max(0, max_tokens - RESERVE_FOR_IO - 500) # Adjusted reservation slightly
+            available_tokens = max(0, max_tokens - RESERVE_FOR_IO - 500)
 
-            # --- Extract Original Query ---
+            # --- Extract Original Query (CORRECTED LOGIC) ---
             original_query = ""
-            if self.history and self.history[-1].get('role') == 'user':
-                 original_query = self.history[-1].get('content', '').strip()
+            # Search backwards through the history snapshot for the last user message
+            for i in range(len(self.history) - 1, -1, -1):
+                if self.history[i].get('role') == 'user':
+                    original_query = self.history[i].get('content', '').strip()
+                    logger.debug(f"Worker found user query at index {i} in the history snapshot.")
+                    break # Stop after finding the most recent user message
+
             if not original_query:
-                 # This should not happen with the fix in MainWindow._send_prompt
-                 logger.error("Worker could not find user query in history snapshot.")
-                 raise ValueError("Could not find user query in history.")
+                 # This path is now less likely, but keep the check
+                 logger.error("Worker could not find any user message in the provided history snapshot.")
+                 # Raise a slightly more informative error
+                 raise ValueError("Could not find any user message in history snapshot.")
+            # --- End Corrected Query Extraction ---
 
             # --- Query Summarization (Conditional) ---
             search_query = original_query # Default to original if not summarized
             summarizer_enabled = self.settings.get('rag_summarizer_enabled', False)
-            # Check if *any* external source that benefits from summarization is enabled
             external_rag_will_run = (
-                self.settings.get('rag_external_enabled', False) or # Master switch (if used)
+                self.settings.get('rag_external_enabled', False) or # Master switch (if used) - CHECK THIS KEY IN YOUR SETTINGS
                 self.settings.get('rag_google_enabled', False) or
                 self.settings.get('rag_bing_enabled', False) or
                 self.settings.get('rag_stackexchange_enabled', False) or
@@ -364,13 +433,12 @@ class Worker(QObject):
                 logger.info("Worker: Stream finished normally.")
 
         except Exception as e:
-            logger.exception("Error occurred in worker process:") # Log full traceback
-            # Avoid emitting error if interruption was the likely cause
+            logger.exception("Error occurred in worker process:")
             if not self._is_interruption_requested():
-                 self.stream_error.emit(f"Worker Error: {e}")
+                 # Pass the specific exception message
+                 self.stream_error.emit(f"Worker Error: {type(e).__name__}: {e}")
             else:
                  logger.info(f"Worker error likely due to interruption request: {e}")
         finally:
-            # Ensure finished signal is always emitted
             logger.debug("Worker: Emitting finished signal from finally block.")
             self.stream_finished.emit()

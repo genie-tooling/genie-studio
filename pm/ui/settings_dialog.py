@@ -15,7 +15,7 @@ import re
 
 # Import project specific info
 from ..core.model_registry import list_models, list_ollama_models, resolve_context_limit
-from ..core.project_config import AVAILABLE_RAG_MODELS, DEFAULT_CONFIG, DEFAULT_PROMPT_TEMPLATE
+from ..core.project_config import AVAILABLE_RAG_MODELS, DEFAULT_CONFIG, DEFAULT_PROMPT_TEMPLATE, AVAILABLE_PYGMENTS_STYLES, DEFAULT_STYLE
 
 # ==========================================================================
 # Background Task for Refreshing Model Lists
@@ -332,7 +332,8 @@ class SettingsDialog(QDialog):
         self.appearance_font_combo = QFontComboBox()
         self.appearance_font_size_spin = QSpinBox()
         self.appearance_theme_combo = QComboBox()
-
+        # *** ADD SYNTAX STYLE COMBO ***
+        self.appearance_style_combo = QComboBox()
     # ------------------------------------------
     # Tab Creation Methods (Use created widgets)
     # ------------------------------------------
@@ -487,6 +488,17 @@ class SettingsDialog(QDialog):
         self.appearance_font_combo.setFontFilters(QFontComboBox.FontFilter.MonospacedFonts); layout.addRow("Editor Font:", self.appearance_font_combo)
         self.appearance_font_size_spin.setRange(8, 32); layout.addRow("Editor Font Size:", self.appearance_font_size_spin)
         self.appearance_theme_combo.addItems(["Dark", "Light"]); layout.addRow("UI Theme:", self.appearance_theme_combo)
+
+        # *** POPULATE AND ADD STYLE COMBO ***
+        self.appearance_style_combo.setToolTip("Select syntax highlighting style (requires Pygments)")
+        if AVAILABLE_PYGMENTS_STYLES:
+            self.appearance_style_combo.addItems(AVAILABLE_PYGMENTS_STYLES)
+        else:
+            self.appearance_style_combo.addItem("Pygments not found")
+            self.appearance_style_combo.setEnabled(False)
+        layout.addRow("Syntax Style:", self.appearance_style_combo)
+        # *** END ADD STYLE COMBO ***
+
         return tab
 
     # ------------------------------------------
@@ -552,6 +564,13 @@ class SettingsDialog(QDialog):
         except: self.appearance_font_combo.setCurrentFont(QFont("Monospace"))
         self.appearance_font_size_spin.setValue(int(s.get('editor_font_size', 11)))
         self.appearance_theme_combo.setCurrentText(s.get('theme', 'Dark'))
+        # *** POPULATE STYLE COMBO ***
+        current_style = s.get('syntax_highlighting_style', DEFAULT_STYLE)
+        if current_style in AVAILABLE_PYGMENTS_STYLES:
+            self.appearance_style_combo.setCurrentText(current_style)
+        elif AVAILABLE_PYGMENTS_STYLES: # If style invalid but list exists, select default
+             self.appearance_style_combo.setCurrentText(DEFAULT_STYLE)
+        # *** END POPULATE STYLE ***
         # Initial UI states
         self._provider_changed(self.llm_provider_select.currentText())
         self._toggle_local_rag_widgets(self.rag_local_enable_cb.isChecked())
@@ -802,6 +821,11 @@ class SettingsDialog(QDialog):
             s['editor_font'] = self.appearance_font_combo.currentFont().family()
             s['editor_font_size'] = self.appearance_font_size_spin.value()
             s['theme'] = self.appearance_theme_combo.currentText()
+            # *** SAVE SELECTED STYLE ***
+            if self.appearance_style_combo.isEnabled(): # Only save if pygments was found
+                s['syntax_highlighting_style'] = self.appearance_style_combo.currentText()
+            else: # If pygments wasn't found, keep the default
+                s['syntax_highlighting_style'] = DEFAULT_STYLE
 
             if not s['main_prompt_template'].strip():
                 logger.warning("Main prompt template cannot be empty. Restoring default.")

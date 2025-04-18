@@ -12,6 +12,7 @@ from ..ui.highlighter import PygmentsHighlighter
 from .token_utils import count_tokens
 # *** IMPORT FROM NEW CONSTANTS FILE ***
 from .constants import TOKEN_COUNT_ROLE, TREE_TOKEN_SIZE_LIMIT
+from .project_config import DEFAULT_STYLE, AVAILABLE_PYGMENTS_STYLES
 
 # Constants should ideally be in a central config module
 IGNORE_DIRS = {'.git', '__pycache__', '.venv', 'venv', '.mypy_cache', '.pytest_cache', 'node_modules'}
@@ -130,8 +131,6 @@ class WorkspaceManager(QObject):
              logger.exception(f"Wks Mgr: Error during tree population: {e}")
         finally:
             tree_widget.expandToDepth(0)
-            tree_widget.resizeColumnToContents(0)
-            tree_widget.resizeColumnToContents(1)
             tree_widget.blockSignals(False)
             logger.info("Wks Mgr: File tree population finished.")
 
@@ -191,11 +190,11 @@ class WorkspaceManager(QObject):
             font_name = self._settings.get("editor_font", "Fira Code")
             font_size = int(self._settings.get("editor_font_size", 11))
             editor.setFont(QFont(font_name, font_size))
-
+            style_name = self._settings.get('syntax_highlighting_style', DEFAULT_STYLE)
             # Apply syntax highlighting
             lang = self._guess_lang(path)
-            editor.highlighter = PygmentsHighlighter(editor.document(), language=lang)
-            logger.debug(f"Applied highlighter for language: {lang} to {path.name}")
+            editor.highlighter = PygmentsHighlighter(editor.document(), language=lang, style_name=style_name)
+            logger.debug(f"Applied highlighter (Style: {style_name}, Lang: {lang}) to {path.name}")
 
         except Exception as e:
              error_msg = f"Error creating editor widget for {path.name}: {e}"
@@ -290,4 +289,18 @@ class WorkspaceManager(QObject):
              self.file_operation_error.emit(error_msg)
              return None
 
-    
+    def apply_syntax_style(self, style_name: str):
+        """Applies a new Pygments style to all currently open editors."""
+        logger.info(f"WorkspaceManager: Applying syntax style '{style_name}' to {len(self.open_editors)} open editors.")
+        if style_name not in AVAILABLE_PYGMENTS_STYLES:
+            logger.warning(f"Cannot apply invalid style '{style_name}'. Falling back to '{DEFAULT_STYLE}'.")
+            style_name = DEFAULT_STYLE
+
+        for editor in self.open_editors.values():
+            if hasattr(editor, 'highlighter') and isinstance(editor.highlighter, PygmentsHighlighter):
+                try:
+                    editor.highlighter.set_style(style_name)
+                except Exception as e:
+                    logger.error(f"Error applying style '{style_name}' to editor for {editor.objectName()}: {e}")
+            else:
+                 logger.warning(f"Editor for {editor.objectName()} has no valid PygmentsHighlighter.")

@@ -26,6 +26,7 @@ from PySide6.QtCore import Qt, QObject, Signal, QRunnable, QThreadPool, QThread,
 from loguru import logger
 import qdarktheme
 import qtawesome as qta
+import shutil
 
 # --- Core Imports ---
 from ..core.logging_setup import logger as log_setup
@@ -636,19 +637,20 @@ class MainWindow(QMainWindow):
         sp.addWidget(chat_panel_widget)  # Add chat panel to splitter
 
         # --- File Tree (Middle) ---
-        self.file_tree = QTreeWidget()
-        # *** Configure columns ***
-        self.file_tree.setColumnCount(2)
-        self.file_tree.setHeaderLabels(['Project', 'Tokens'])
+        self.file_tree=QTreeWidget()
+        self.file_tree.setHeaderLabels(['Project', 'Tokens']) # Set header labels first
         self.file_tree.setAlternatingRowColors(True)
-        # *** Adjust resizing behavior if needed ***
-        self.file_tree.header().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch)  # Stretch name column
-        self.file_tree.header().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.ResizeToContents)  # Resize tokens column
-        # self.file_tree.setColumnWidth(1, 80) # Or set a fixed width if preferred
-        sp.addWidget(self.file_tree)
 
+        # --- Configure Header Behavior ---
+        header = self.file_tree.header()
+        # Column 0 (Project): Stretch to fill available space initially. User can still resize.
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        # Optional: Set a reasonable minimum size for the Project column
+        # header.setMinimumSectionSize(150)
+        # --- End Header Configuration ---
+
+        sp.addWidget(self.file_tree) # Add tree to splitter
         # --- Tab Editor (Right) ---
         self.tab_editor = QTabWidget()
         self.tab_editor.setTabsClosable(True)
@@ -662,38 +664,37 @@ class MainWindow(QMainWindow):
 
     def _initial_workspace_setup(self):
         logger.debug("Initial workspace setup...")
-        if not hasattr(self, 'config_dock'):
-            logger.error("Cannot run initial setup: config_dock missing.")
-            return
+        if not hasattr(self,'config_dock'): logger.error("Cannot run initial setup: config_dock missing."); return
 
-        # Ensure default prompt keys exist in settings
-        self.settings.setdefault('prompts', [])
-        self.settings.setdefault('selected_prompt_ids', [])
+        # --- Populate Config Dock First ---
+        try:
+            self.settings.setdefault('prompts', []); self.settings.setdefault('selected_prompt_ids', [])
+            self.config_dock.populate_controls(self.settings);
+            # Handle potential missing keys during prompt population
+            prompts_data = self.settings.get('prompts', [])
+            selected_ids = self.settings.get('selected_prompt_ids', [])
+            self.config_dock.populate_available_prompts(prompts_data)
+            self.config_dock.populate_selected_prompts(selected_ids, prompts_data)
+        except Exception as e:
+             logger.exception("Error populating ConfigDock during initial setup.")
+        # --- End Config Dock Population ---
 
-        # --- Populate UI Elements ---
-        # Populate dock controls FIRST
-        self.config_dock.populate_controls(self.settings)
-        self.config_dock.populate_available_prompts(
-            self.settings.get('prompts', []))
-        self.config_dock.populate_selected_prompts(self.settings.get(
-            'selected_prompt_ids', []), self.settings.get('prompts', []))
+        self._update_active_services_and_context();
+        self._refresh_models_for_dock(self.settings.get('provider','Ollama'));
 
-        # *** Populate file tree BEFORE calculating context ***
-        self.workspace_manager.populate_file_tree(self.file_tree)
+        # Populate the tree *synchronously*
+        try:
+            self.workspace_manager.populate_file_tree(self.file_tree);
+        except Exception as e:
+            logger.exception("Error populating file tree during initial setup.")
 
-        # --- Initialize Services and Update Context ---
-        # This will call _update_statusbar_context, which now has a populated tree
-        self._update_active_services_and_context()
+        # --- Use QTimer to set sizes AFTER population and initial events ---
+        # A delay of 0 runs it in the next event loop cycle, 10ms gives a tiny bit more settling time.
+        QTimer.singleShot(10, self._finalize_ui_layout)
+        # --- End QTimer ---
 
-        # Refresh models *after* services might be initially set
-        self._refresh_models_for_dock(self.settings.get('provider', 'Ollama'))
-
-        # Set initial splitter sizes after a short delay (allows window to settle)
-        QTimer.singleShot(100, self._set_initial_splitter_sizes)
-
-        # Update input token count initially
         self._update_input_token_count()
-        logger.info("Initial workspace setup complete.")
+
 
     def _set_initial_splitter_sizes(self):
         """Sets reasonable initial proportions for the main horizontal splitter."""
@@ -1128,9 +1129,52 @@ class MainWindow(QMainWindow):
             self.workspace_manager.project_path
         )
         # UI updates for starting generation are handled by the generation_started signal
+    def _finalize_ui_layout(self):
+        """Sets column widths and splitter sizes after initial population."""
+        logger.debug("Finalizing UI layout (column/splitter sizes)...")
 
-# ... (rest of the MainWindow class) ...
-# pm/ui/main_window.py
+        # Set Tree Column Widths
+        if hasattr(self, 'file_tree') and self.file_tree.columnCount() > 1:
+            header = self.file_tree.header() # Get header reference
+            try:
+                # 1. Set the fixed width for the Tokens column
+                initial_token_column_width = 80
+                self.file_tree.setColumnWidth(1, initial_token_column_width)
+                logger.debug(f"Set fixed width for column 1 to {initial_token_column_width}px.")
+
+                # 2. Tell the header *not* to automatically stretch the last section
+                header.setStretchLastSection(False)
+                logger.debug("Set header.stretchLastSection(False).")
+
+                # 3. Now, set the Project column to stretch
+                header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+                logger.info(f"Set column 0 resize mode to Stretch.")
+
+                # Log widths immediately after setting modes
+                logger.debug(f"  Immediate widths - Col 0: {self.file_tree.columnWidth(0)}, Col 1: {self.file_tree.columnWidth(1)}")
+                # Log again after a tiny delay to see if splitter resize changes them
+                QTimer.singleShot(10, lambda: logger.debug(f"  Post-layout widths (after timer) - Col 0: {self.file_tree.columnWidth(0)}, Col 1: {self.file_tree.columnWidth(1)}"))
+
+            except Exception as e:
+                 logger.error(f"Error setting column widths: {e}")
+        else:
+             logger.warning("Cannot set column widths: file_tree not ready or has < 2 columns.")
+
+        # Set Splitter Sizes (keep this logic)
+        if hasattr(self,'main_splitter'):
+             width = self.main_splitter.width()
+             if width > 100:
+                  chat_prop = 0.35
+                  tree_prop = 0.20
+                  edit_prop = 1.0 - chat_prop - tree_prop
+                  sizes = [int(width * chat_prop), int(width * tree_prop), int(width * edit_prop)]
+                  self.main_splitter.setSizes(sizes)
+                  logger.info(f"Set main_splitter sizes based on width {width}: {sizes}.")
+                  QTimer.singleShot(10, lambda: logger.debug(f"  Post-layout splitter sizes (after timer): {self.main_splitter.sizes()}"))
+             else:
+                  logger.warning(f"Splitter too small ({width}) to resize confidently.")
+        else:
+             logger.warning("main_splitter not found for resizing.")
 
     def _calculate_checked_file_paths_for_worker(self) -> List[Path]:
         """
@@ -2221,7 +2265,7 @@ class MainWindow(QMainWindow):
         # Create the dialog with a copy of the current settings
         # Pass 'self' as the parent
         dialog = SettingsDialog(self.settings.copy(), self)
-
+        original_settings = self.settings.copy()
         # Execute the dialog modally. Check if the user clicked "OK".
         if dialog.exec() == QDialog.Accepted:
             logger.info("Settings dialog accepted by user.")
@@ -2229,10 +2273,22 @@ class MainWindow(QMainWindow):
                 # --- Apply Accepted Settings ---
                 # Update the main settings dictionary with changes from the dialog
                 self.settings.update(dialog.settings)
+                new_settings = dialog.settings
+                changed_keys = {k for k in DEFAULT_CONFIG if original_settings.get(k) != new_settings.get(k)}
+                logger.debug(f"Changed settings keys: {changed_keys}")
+                # Apply changes that affect the UI or core components
+                if 'theme' in changed_keys:
+                    self._apply_theme(save=False) # Apply theme first (might affect highlighter)
+                if 'editor_font' in changed_keys or 'editor_font_size' in changed_keys:
+                    self._apply_editor_font(save=False) # Apply font
 
-                # Apply appearance changes immediately (without saving yet)
-                self._apply_theme(save=False)
-                self._apply_editor_font(save=False)
+                # *** APPLY SYNTAX STYLE IF CHANGED ***
+                if 'syntax_highlighting_style' in changed_keys:
+                    if hasattr(self, 'workspace_manager'):
+                        self.workspace_manager.apply_syntax_style(self.settings['syntax_highlighting_style'])
+                    else:
+                        logger.error("Cannot apply syntax style: WorkspaceManager not found.")
+
 
                 # Update services based on potentially changed LLM/API settings
                 self._update_active_services_and_context()

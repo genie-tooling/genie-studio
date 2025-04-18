@@ -2,6 +2,8 @@
 
 PatchMind is an AI-enhanced code editor with inline LLM support, real-time prompt workflows, and RAG-based file context awareness.
 
+![Screenshot](screenshot/screenshot.png)
+
 ## ✨ Features
 
 - **LLM Chat Integration** — Chat with Gemini or Ollama-backed models
