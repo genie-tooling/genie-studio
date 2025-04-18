@@ -7,11 +7,13 @@ from .settings_service import SettingsService
 from .ollama_service import OllamaService
 from .gemini_service import GeminiService
 from .model_registry import resolve_context_limit, list_ollama_models, list_gemini_models
+from .project_config import DEFAULT_CONFIG # For fallback limit
 
 class LLMServiceProvider(QObject):
     """
     Manages the instantiation and switching of LLM service clients (Ollama, Gemini)
-    based on settings provided by SettingsService.
+    based on settings provided by SettingsService. Resolves and emits the correct
+    context limit early during initialization and after project settings load.
     """
     services_updated = Signal() # Emitted when model or summarizer service instances change
     context_limit_changed = Signal(int) # Emitted when the main model's context limit changes
@@ -22,22 +24,31 @@ class LLMServiceProvider(QObject):
         self._model_service: Optional[OllamaService | GeminiService] = None
         self._summarizer_service: Optional[OllamaService | GeminiService] = None
 
-        # Connect to relevant settings changes
+        # Connect to relevant settings changes *before* initial update
         self._settings_service.llm_config_changed.connect(self._update_services)
         self._settings_service.rag_config_changed.connect(self._update_services) # RAG config might change summarizer
+        # *** Connect settings_loaded to trigger service update ***
+        self._settings_service.settings_loaded.connect(self._update_services)
+        # **********************************************************
 
-        # Initial service creation
-        self._update_services()
-        logger.info("LLMServiceProvider initialized.")
+        # Initial service creation AND context limit resolution happens here
+        # because __init__ calls _update_services implicitly via the settings_loaded connection
+        # or directly if no settings file existed initially. Let's call it explicitly
+        # just in case settings_loaded doesn't fire on first ever run?
+        # No, settings_loaded *should* fire even if loading defaults.
+        # self._update_services() # Explicit call removed, rely on signal connection
+
+        logger.info("LLMServiceProvider initialized and connected to settings signals.")
 
     @Slot()
     def _update_services(self):
         """
-        Reads current settings and creates/updates the appropriate service instances.
+        Reads current settings, creates/updates service instances, and immediately
+        resolves and emits the context limit for the main model.
+        This is triggered by llm_config_changed, rag_config_changed, OR settings_loaded.
         """
-        logger.info("LLMServiceProvider: Updating services based on settings...")
+        logger.info("LLMServiceProvider: _update_services triggered. Updating services and resolving context limit...")
         services_changed = False
-        old_model_ctx = self.get_context_limit()
 
         # --- Update Main Model Service ---
         provider = self._settings_service.get_setting('provider', 'Ollama').lower()
@@ -46,101 +57,114 @@ class LLMServiceProvider(QObject):
         temp = self._settings_service.get_setting('temperature', 0.3)
         top_k = self._settings_service.get_setting('top_k', 40)
 
+        # Store previous service details for comparison
+        old_model_service = self._model_service
+        old_model_type = type(old_model_service).__name__ if old_model_service else None
+        old_model_name = getattr(old_model_service, 'model', None) if old_model_service else None
+
         new_model_service = None
-        if provider == 'ollama' and model_name:
-            try:
-                # Check if Ollama model exists before creating service
-                # This prevents errors if the user configures a non-existent model
-                available_ollama = list_ollama_models() # Uses cached list
-                if model_name in available_ollama:
+        try:
+            if provider == 'ollama' and model_name:
+                logger.debug(f"LLMServiceProvider: Attempting Ollama setup for model '{model_name}'")
+                try:
+                    resolve_context_limit(provider, model_name) # Check existence via ollama.show
                     new_model_service = OllamaService(model=model_name)
-                else:
-                    logger.error(f"Configured Ollama model '{model_name}' not found. Cannot create service.")
-                    # Optionally: Try to select the first available Ollama model?
-                    # if available_ollama:
-                    #     logger.warning(f"Falling back to first available Ollama model: {available_ollama[0]}")
-                    #     self._settings_service.set_setting('model', available_ollama[0]) # This triggers another update cycle
-                    #     return # Exit early, let the next update handle it
+                    logger.debug(f"LLMServiceProvider: Successfully created OllamaService for '{model_name}'.")
+                except Exception as resolve_err:
+                     logger.error(f"LLMServiceProvider: Failed context check/creation for Ollama model '{model_name}': {resolve_err}.")
 
-            except Exception as e:
-                logger.exception(f"Failed to initialize OllamaService for model '{model_name}': {e}")
-        elif provider == 'gemini' and model_name and api_key:
-            try:
-                # Potentially check Gemini model availability here too if needed
+            elif provider == 'gemini' and model_name and api_key:
+                logger.debug(f"LLMServiceProvider: Attempting Gemini setup for model '{model_name}'")
                 new_model_service = GeminiService(model=model_name, api_key=api_key, temp=temp, top_k=top_k)
-            except Exception as e:
-                logger.exception(f"Failed to initialize GeminiService for model '{model_name}': {e}")
-        elif provider == 'gemini' and not api_key:
-             logger.warning("Gemini provider selected but API key is missing.")
-        elif not model_name:
-            logger.warning(f"{provider.capitalize()} provider selected but model name is empty.")
+                logger.debug(f"LLMServiceProvider: Successfully created GeminiService for '{model_name}'.")
 
-        # Update only if the type or key parameters changed significantly
-        # Note: Simple comparison `!=` might not work well if objects don't implement `__eq__` meaningfully
-        # For now, we replace if a new service could be created
-        if new_model_service is not None or self._model_service is not None: # Check if there was or is a service
-             # Rough check: Replace if provider/model changed or if one exists and the other doesn't
-             current_type = type(self._model_service).__name__ if self._model_service else None
-             new_type = type(new_model_service).__name__ if new_model_service else None
-             current_model = getattr(self._model_service, 'model', None) if self._model_service else None
+            elif provider == 'gemini' and not api_key:
+                 logger.warning("LLMServiceProvider: Gemini provider selected but API key is missing.")
+            elif not model_name:
+                logger.warning(f"LLMServiceProvider: {provider.capitalize()} provider selected but model name is empty.")
 
-             if new_type != current_type or getattr(new_model_service, 'model', None) != current_model:
-                 logger.info(f"Switching main model service from {current_type}({current_model}) to {new_type}({getattr(new_model_service, 'model', None)})")
-                 self._model_service = new_model_service
-                 services_changed = True
-             # Maybe update params like temp/topk if service type is the same?
+        except Exception as e:
+            logger.exception(f"LLMServiceProvider: Failed during service instantiation for {provider}/{model_name}: {e}")
+            new_model_service = None
 
-        # --- Update Summarizer Service ---
+        # Update internal service reference if changed
+        new_type = type(new_model_service).__name__ if new_model_service else None
+        new_model = getattr(new_model_service, 'model', None) if new_model_service else None
+
+        if new_type != old_model_type or new_model != old_model_name:
+            logger.info(f"LLMServiceProvider: Switching main model service from {old_model_type}({old_model_name}) to {new_type}({new_model})")
+            self._model_service = new_model_service
+            services_changed = True
+        else:
+             logger.debug(f"LLMServiceProvider: Main model service unchanged ({new_type}({new_model})).")
+
+
+        # --- Update Summarizer Service (logic remains similar) ---
+        # (Keep existing summarizer update logic here...)
         summ_enabled = self._settings_service.get_setting('rag_summarizer_enabled', True)
         summ_provider = self._settings_service.get_setting('rag_summarizer_provider', 'Ollama').lower()
         summ_model = self._settings_service.get_setting('rag_summarizer_model_name', '')
-        # Summarizer typically doesn't need API key separate from main (Gemini uses same config, Ollama needs none)
+        summ_api_key = api_key # Use main API key for Gemini
+
+        old_summ_service = self._summarizer_service
+        old_summ_type = type(old_summ_service).__name__ if old_summ_service else None
+        old_summ_model = getattr(old_summ_service, 'model', None) if old_summ_service else None
 
         new_summarizer_service = None
         if summ_enabled:
-            if summ_provider == 'ollama' and summ_model:
-                try:
-                    available_ollama = list_ollama_models() # Cached
-                    if summ_model in available_ollama:
-                         new_summarizer_service = OllamaService(model=summ_model)
-                    else:
-                         logger.error(f"Configured Summarizer Ollama model '{summ_model}' not found.")
-                except Exception as e:
-                    logger.exception(f"Failed to initialize Summarizer OllamaService for model '{summ_model}': {e}")
-            elif summ_provider == 'gemini' and summ_model and api_key: # Check main API key for Gemini
-                 try:
-                      # Assume temp/topk don't apply or use defaults for summarizer
-                      new_summarizer_service = GeminiService(model=summ_model, api_key=api_key)
-                 except Exception as e:
-                      logger.exception(f"Failed to initialize Summarizer GeminiService for model '{summ_model}': {e}")
-            elif summ_provider == 'gemini' and not api_key:
-                 logger.warning("Summarizer uses Gemini provider but main API key is missing.")
-            elif not summ_model:
-                 logger.warning(f"Summarizer provider {summ_provider.capitalize()} selected but model name is empty.")
+            try:
+                if summ_provider == 'ollama' and summ_model:
+                    try:
+                        resolve_context_limit(summ_provider, summ_model)
+                        logger.debug(f"LLMServiceProvider: Attempting Summarizer OllamaService for model '{summ_model}'")
+                        new_summarizer_service = OllamaService(model=summ_model)
+                    except Exception as resolve_err:
+                         logger.error(f"LLMServiceProvider: Failed context check/creation for Summarizer Ollama model '{summ_model}': {resolve_err}.")
 
-        # Update Summarizer Service
-        # Similar check as above
-        current_summ_type = type(self._summarizer_service).__name__ if self._summarizer_service else None
+                elif summ_provider == 'gemini' and summ_model and summ_api_key:
+                     logger.debug(f"LLMServiceProvider: Attempting Summarizer GeminiService for model '{summ_model}'")
+                     new_summarizer_service = GeminiService(model=summ_model, api_key=summ_api_key)
+
+                elif summ_provider == 'gemini' and not summ_api_key:
+                     logger.warning("LLMServiceProvider: Summarizer uses Gemini provider but main API key is missing.")
+                elif not summ_model:
+                     logger.warning(f"LLMServiceProvider: Summarizer provider {summ_provider.capitalize()} selected but model name is empty.")
+            except Exception as e:
+                logger.exception(f"LLMServiceProvider: Failed during summarizer instantiation for {summ_provider}/{summ_model}: {e}")
+                new_summarizer_service = None
+
+        # Update Summarizer Service reference if changed
         new_summ_type = type(new_summarizer_service).__name__ if new_summarizer_service else None
-        current_summ_model = getattr(self._summarizer_service, 'model', None) if self._summarizer_service else None
+        new_summ_model = getattr(new_summarizer_service, 'model', None) if new_summarizer_service else None
 
-        if new_summ_type != current_summ_type or getattr(new_summarizer_service, 'model', None) != current_summ_model:
-             logger.info(f"Switching summarizer service from {current_summ_type}({current_summ_model}) to {new_summ_type}({getattr(new_summarizer_service, 'model', None)})")
+        if new_summ_type != old_summ_type or new_summ_model != old_summ_model:
+             logger.info(f"LLMServiceProvider: Switching summarizer service from {old_summ_type}({old_summ_model}) to {new_summ_type}({new_summ_model})")
              self._summarizer_service = new_summarizer_service
              services_changed = True
         elif not summ_enabled and self._summarizer_service is not None:
-             logger.info("Disabling summarizer service.")
+             logger.info("LLMServiceProvider: Disabling summarizer service.")
              self._summarizer_service = None # Explicitly disable
              services_changed = True
+        else:
+             logger.debug("LLMServiceProvider: Summarizer service unchanged.")
 
 
+        # --- Emit signals AFTER potential changes ---
         if services_changed:
+            logger.debug("LLMServiceProvider: Emitting services_updated signal.")
             self.services_updated.emit()
 
-        # Check and emit context limit change for the main model
-        new_model_ctx = self.get_context_limit()
-        if new_model_ctx != old_model_ctx:
-             self.context_limit_changed.emit(new_model_ctx)
+        # *** Always resolve and emit the context limit for the *current* main model ***
+        # This ensures the correct limit is known immediately after any update.
+        resolved_limit = 0
+        try:
+            resolved_limit = self.get_context_limit() # Use the getter which handles resolution
+            logger.info(f"LLMServiceProvider: Resolved context limit post-update: {resolved_limit}. Emitting signal.")
+            self.context_limit_changed.emit(resolved_limit)
+        except Exception as e:
+            logger.error(f"LLMServiceProvider: Error resolving context limit after update: {e}. Emitting fallback.")
+            fallback_limit = DEFAULT_CONFIG.get('context_limit', 4096)
+            self.context_limit_changed.emit(fallback_limit)
 
 
     def get_model_service(self) -> Optional[OllamaService | GeminiService]:
@@ -152,18 +176,37 @@ class LLMServiceProvider(QObject):
         return self._summarizer_service
 
     def get_context_limit(self) -> int:
-        """Resolves and returns the context limit for the *current main model*."""
-        provider = self._settings_service.get_setting('provider', 'Ollama').lower()
-        model_name = self._settings_service.get_setting('model', '')
-        if not model_name: return self._settings_service.get_setting('context_limit', 4096) # Fallback if no model
+        """Resolves and returns the context limit for the *currently active main model*."""
+        logger.trace("LLMServiceProvider: get_context_limit() called.")
+        # Use the currently active service if it exists
+        active_service = self._model_service
+        if active_service:
+             provider = 'gemini' if isinstance(active_service, GeminiService) else 'ollama'
+             model_name = getattr(active_service, 'model', '')
+             if model_name:
+                  try:
+                      limit = resolve_context_limit(provider, model_name)
+                      logger.trace(f"LLMServiceProvider: Resolved context limit from active service ({provider}/{model_name}): {limit}")
+                      return limit
+                  except Exception as e:
+                       logger.error(f"LLMServiceProvider: Failed to resolve context limit for active service {provider}/{model_name}: {e}. Falling back.")
+                       # Fall through to using settings if active service resolution fails
+             else:
+                  logger.warning("LLMServiceProvider: Active service exists but has no model name? Falling back to settings.")
+                  # Fall through
 
-        try:
-             # Use the dynamic resolution function
-             limit = resolve_context_limit(provider, model_name)
-             # Store it back into settings maybe? Or just return resolved value?
-             # self._settings_service.set_setting('context_limit', limit) # careful with signaling loops
-             return limit
-        except Exception as e:
-             logger.error(f"Failed to resolve context limit for {provider}/{model_name}: {e}")
-             return self._settings_service.get_setting('context_limit', 4096) # Fallback to stored/default
-
+        # Fallback: If no active service OR active service failed, resolve based on *settings*
+        logger.debug("LLMServiceProvider: Falling back to resolving context limit from settings.")
+        provider_from_settings = self._settings_service.get_setting('provider', 'Ollama').lower()
+        model_from_settings = self._settings_service.get_setting('model', '')
+        if model_from_settings:
+            try:
+                 limit = resolve_context_limit(provider_from_settings, model_from_settings)
+                 logger.debug(f"LLMServiceProvider: Resolved limit from settings ({provider_from_settings}/{model_from_settings}): {limit}")
+                 return limit
+            except Exception as e:
+                 logger.warning(f"LLMServiceProvider: Failed to resolve limit from settings ({provider_from_settings}/{model_from_settings}): {e}. Using default.")
+                 return DEFAULT_CONFIG.get('context_limit', 4096)
+        else:
+             logger.debug(f"LLMServiceProvider: No model in settings. Using default context limit.")
+             return DEFAULT_CONFIG.get('context_limit', 4096)

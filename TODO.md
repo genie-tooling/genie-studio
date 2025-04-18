@@ -1,93 +1,90 @@
-# PatchMind IDE - Roadmap TODO
+# PatchMind IDE - Roadmap TODO (Generated: 2025-04-18)
 
-## ✅ Completed
+## ✅ Recently Addressed / Partially Implemented
 
-- v0.1
-
----
-
-## 🔥 Blockers (Bugs & Structural Deficiencies)
-
-- [ ] Refactor Settings Dialog (`pm/ui/settings_dialog.py`)
-  - [ ] Remove widgets now handled by `ConfigDock`
-  - [ ] Keep widgets for API Keys, RAG Defaults, Appearance Defaults
-  - [ ] Update `SettingsDialog._populate_all_fields()` and `_on_accept()`
-  - [ ] Update `MainWindow._open_settings()` logic to handle settings copy/merge/save
-- [ ] Update `DEFAULT_CONFIG` with `prompts` and `selected_prompt_ids`
-- [ ] Validate `prompts` and `selected_prompt_ids` in `load_project_config`
-- [ ] Update `save_project_config` to include prompt data
-- [ ] Create and integrate `PromptEditorDialog`
-- [ ] Implement `_new_prompt`, `_edit_prompt`, `_delete_prompts` in `MainWindow`
-- [ ] Integrate prompt logic with `Worker.__init__`
-- [ ] Modify `Worker._prepare_final_prompt` for prompt ID lookup
-- [ ] Ensure prompt data is passed in `MainWindow._initiate_llm_stream`
-- [ ] Update context estimation and truncation logic
-- [ ] Implement RAG directory walking using `walk`/`rglob`
-- [ ] Add RAG max results/ranking settings to UI and logic
-- [ ] Refactor file token estimation for speed and accuracy
-- [ ] Improve Diff dialog integration with inline apply logic
-- [ ] Refactor `MainWindow` (>3000 LOC compressed) into modular components
-- [ ] Create centralized `SettingsService` to replace raw dict access
-- [ ] Move constants to a centralized config/constants module
-- [ ] Add `@Slot(...)` decorators to all signal receivers
-- [ ] Standardize `Worker` thread cleanup pattern with `deleteLater`
-- [ ] Confirm unsaved changes before tab/window close
-- [ ] Add dirty indicator to file tabs in `WorkspaceManager`
-- [ ] Confirm before destructive actions in file tree (rename/delete)
-- [ ] Integrate Git awareness and patching in DiffDialog
-- [ ] Validate API key/model mismatch in provider selection
-- [ ] Add import/export for project settings
-- [ ] Add unit tests with Pytest for core components
-- [ ] Improve chat input usability when LLM is busy
-- [ ] Add inline feedback for signal/slot validation
-- [ ] Preview theme/font changes before saving
-- [ ] Use enums/constants for keys like `provider`, `model`, `theme`
-- [ ] Ensure signal-slot disconnection where needed (dynamic objects)
-- [ ] Create summarizer plugin registry (factory-based)
-- [ ] Modularize LLM task execution for extensibility
-- [ ] Add UI feedback for token estimation accuracy in status bar
+*   **Settings Management:**
+    *   Created centralized `SettingsService`. (DONE)
+    *   Refactored `SettingsDialog` to handle global settings (API Keys, Global RAG Defaults, Features, Appearance). (DONE - Review Responsibilities vs ConfigDock)
+    *   `ConfigDock` now handles project-specific LLM selection, RAG source *enablement*, and prompt selection. (DONE)
+*   **UI / Core:**
+    *   Implemented background fetching for model lists (`ModelListService`) with improved thread cleanup. (DONE)
+    *   Implemented LLM service switching (`LLMServiceProvider`). (DONE)
+    *   Implemented RAG fetching (DDG, Bing, ArXiv) and basic ranking (`rag_service.py`). (DONE - Needs Directory/Code support)
+    *   Implemented token limit display and enforcement in `MainWindow`/`ConfigDock`. (DONE)
+    *   Implemented unsaved changes confirmation for editor tabs. (DONE)
+    *   Implemented dirty indicator (`*`) for editor tabs. (DONE)
+    *   Implemented file tree context menu (Open, Check/Uncheck, Expand). (DONE)
+    *   Implemented recursive check/uncheck for file tree directories. (DONE)
+*   **Guidelines:**
+    *   Applied `@Slot` decorators with type hints extensively in Handler classes. (DONE - Verify completeness)
+    *   Standardized `Worker` thread cleanup pattern (Implemented in `ModelListService`, needs review in `TaskManager`). (PARTIAL)
 
 ---
 
-## 🔁 Changes (New Features, Design Goals)
+## 🔥 Blockers & Critical Tasks (Bugs, Missing Core Features, Refactoring)
 
-### ✨ Prompt Execution Modes
+*   [ ] **Prompt Management:**
+    *   [ ] Implement `PromptEditorDialog` for creating and editing prompts.
+    *   [ ] Integrate `PromptEditorDialog` with `PromptActionHandler` (`handle_new_prompt`, `handle_edit_prompt`).
+    *   [ ] Implement prompt storage/retrieval within `SettingsService` (currently only `selected_prompt_ids` seems managed).
+    *   [ ] Implement prompt deletion logic in `SettingsService` and connect `PromptActionHandler.handle_delete_prompt`.
+    *   [ ] Integrate selected prompts into `Worker`'s context preparation (`_prepare_final_prompt`). Consider how multiple prompts are combined.
+*   [ ] **`MainWindow` Refactoring:**
+    *   [ ] Break down `MainWindow` (still large) into smaller, more focused components/handlers (e.g., `MainUI`, `ChatUI`, `FileTreeUI`, `StatusBarController`, `ActionManager`). Follow SoC principles.
+*   [ ] **Threading Robustness:**
+    *   [ ] **Review `TaskManager` thread lifecycle:** Thoroughly audit the start/stop/cleanup logic (`_request_stop_and_wait`, `_on_thread_finished`, `_finalize_generation`) against `DEVELOPER_GUIDELINES.md`. Simplify if possible, ensure no race conditions or leaks.
+    *   [ ] **Review `Worker` interruption pattern:** Simplify `background_tasks.Worker._is_interruption_requested()` to primarily rely on `QThread.currentThread().isInterruptionRequested()` as per guidelines, reducing internal flag complexity if feasible.
+*   [ ] **RAG Enhancements:**
+    *   [ ] Implement RAG directory walking/processing within `Worker` or `rag_service` (currently only handles files listed in `rag_local_sources` or checked files).
+    *   [ ] Add settings (UI in `SettingsDialog`? `ConfigDock`?) for RAG directory crawling depth, file inclusion/exclusion patterns (beyond basic `IGNORE_DIRS`/`IGNORE_EXT`).
+    *   [ ] Refactor file token estimation for accuracy and potentially speed (currently basic `tiktoken` count).
+*   [ ] **Testing:**
+    *   [ ] **Add Unit Tests (Pytest):** Prioritize core logic: `SettingsService`, `ChatManager`, `Worker` (mocked services), `rag_service`, `model_registry`.
+    *   [ ] **Add Integration/UI Tests (QTest):** Cover key workflows: Open project, load file, edit+save, send chat, receive stream, change settings via dock, check/uncheck files, token limit enforcement.
 
-- [ ] **Automatic Mode**
-  - [ ] Detect currently open/active file
-  - [ ] Apply prompt to open file and edit inline with streaming updates
-  - [ ] Add toggle in ConfigDock or toolbar
+---
 
-- [ ] **Batch Mode**
-  - [ ] Allow multi-select from file tree
-  - [ ] Apply prompt one-by-one to files
-  - [ ] Show progress per file, allow cancel/skip
+## 🔁 Changes & Feature Enhancements
 
-### 🧠 Architectural Enhancements
-
-- [ ] Introduce `SettingsService` with defaults, validation, mutation
-- [ ] Refactor `MainWindow` into modular subcomponents:
-  - [ ] `MainUI`
-  - [ ] `ChatHandlers`
-  - [ ] `PromptHandlers`
-  - [ ] `FileTreeHandlers`
-  - [ ] `SettingsHandlers`
-- [ ] Add factory and registry support for LLM providers/summarizers
-- [ ] Encapsulate all dialogs and connect lazily via factory
-- [ ] Add RAG & summarizer support indicators in UI
-- [ ] Deduplicate send button logic and improve tooltips
-- [ ] Add appearance test (light/dark, syntax highlighting)
+*   [ ] **Prompt Execution Modes:** (Design/Implement)
+    *   [ ] **Automatic Mode:** Apply selected prompt(s) automatically to the currently active editor file.
+    *   [ ] **Batch Mode:** Allow multi-select from file tree, apply prompt sequentially to files, show progress.
+*   [ ] **Diff/Patch Improvements:**
+    *   [ ] Implement "Apply Patch" functionality in `DiffDialog`.
+    *   [ ] Integrate `DiffDialog` with LLM responses that generate patches.
+    *   [ ] Consider Git integration for context-aware patching and diffing.
+*   [ ] **File Tree:**
+    *   [ ] Add settings (e.g., in `SettingsDialog` under Features/Appearance) to control visibility of hidden files/directories (`.*`).
+    *   [ ] Implement confirmation dialogs for destructive actions (Rename/Delete - requires adding these actions first).
+*   [ ] **UI/UX:**
+    *   [ ] Improve chat input usability when LLM is busy (e.g., clearer visual indication beyond disabled button).
+    *   [ ] Add UI feedback for background token estimation progress/status in status bar.
+    *   [ ] Deduplicate send button logic/state management if possible (currently handled in `ChatActionHandler` and `MainWindow`).
+    *   [ ] Review `ChatActionHandler`/`ChatMessageWidget` interaction for list item sizing stability (related to `fix.sh`).
+*   [ ] **Configuration:**
+    *   [ ] Add Import/Export functionality for project settings (`.patchmind.json`).
+    *   [ ] Use Enums or Constants for dictionary keys used across modules (settings, message formats, etc.).
+    *   [ ] Validate API Key / Model mismatches during provider/model selection (e.g., warn if Gemini selected but no key).
+*   [ ] **Extensibility:**
+    *   [ ] Design/Implement plugin registry for Summarizers (Factory Pattern).
+    *   [ ] Modularize LLM task execution logic within `Worker` for easier addition of new task types (e.g., code completion, refactoring).
 
 ---
 
 ## 🧪 Testing Roadmap
 
-- [ ] Add Pytest-based unit tests
-- [ ] Test prompt management logic
-- [ ] Test `Worker` signal flow
-- [ ] Test file manager CRUD ops
-- [ ] Test configuration load/save accuracy
-- [ ] Add QTest-based UI integration tests (edit/save/stream)
-
-Notes:
-The tree view does not show hidden (.file) files. We should surface any extensions/dirs/nice-to-be-able-tochange things that are being excluded in an 'advanced' section of the settings. Give me a plan for this.
+*   [ ] **Unit Tests (Pytest):** (Cover items listed in Blockers section)
+    *   [ ] `SettingsService` load/save/validation/get/set.
+    *   [ ] `ChatManager` history manipulation, signals.
+    *   [ ] `Worker` context gathering logic (mock file system/services).
+    *   [ ] `rag_service` fetching and ranking logic (mock external APIs/models).
+    *   [ ] `model_registry` listing and context limit resolution.
+    *   [ ] `WorkspaceManager` file operations, editor tracking.
+    *   [ ] Prompt template formatting logic.
+*   [ ] **Integration/UI Tests (QTest):** (Cover items listed in Blockers section)
+    *   [ ] Open project -> Tree populates -> File double-click -> Editor opens.
+    *   [ ] Edit file -> Save action enables -> Save -> Dirty indicator clears.
+    *   [ ] Type in chat -> Send -> AI response streams -> Edit/Delete message.
+    *   [ ] Check/uncheck files -> Token count updates -> Limit enforces deselection.
+    *   [ ] Change provider/model in dock -> Model list updates -> Context limit updates.
+    *   [ ] Open Settings Dialog -> Change theme/font -> Changes apply.

@@ -304,3 +304,13 @@ class WorkspaceManager(QObject):
                     logger.error(f"Error applying style '{style_name}' to editor for {editor.objectName()}: {e}")
             else:
                  logger.warning(f"Editor for {editor.objectName()} has no valid PygmentsHighlighter.")
+
+    def apply_font_to_editors(self, font_family: str, font_size: int):
+        """Applies the specified font family and size to all open editor widgets."""
+        logger.info(f"Applying font '{font_family}', size {font_size} to {len(self.open_editors)} editors.")
+        new_font = QFont(font_family, font_size)
+        for editor in self.open_editors.values():
+            try:
+                editor.setFont(new_font)
+            except Exception as e:
+                 logger.error(f"Error applying font to editor for {editor.objectName()}: {e}")

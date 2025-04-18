@@ -1,5 +1,5 @@
 # pm/handlers/workspace_action_handler.py
-from PySide6.QtCore import QObject, Signal, Slot, Qt, QTimer # Added QTimer
+from PySide6.QtCore import QObject, Signal, Slot, Qt, QTimer, QModelIndex # Added QTimer
 from PySide6.QtWidgets import ( QMainWindow, QTreeWidget, QTreeWidgetItem, QTabWidget,
                               QFileDialog, QMessageBox, QLineEdit, QInputDialog,
                               QPlainTextEdit ) # Added QPlainTextEdit
@@ -85,6 +85,35 @@ class WorkspaceActionHandler(QObject):
 
 
     # --- Action Handlers (Slots) ---
+    @Slot(QModelIndex)
+    def handle_tree_item_clicked(self, index: QModelIndex):
+        """Handles single-clicking on an item, toggling directory expansion if name clicked."""
+        if not index.isValid():
+            return
+
+        item = self._file_tree.itemFromIndex(index)
+        if not item:
+            return
+
+        # Check if the click was specifically on column 0 (the name column)
+        if index.column() == 0:
+            path_str = item.data(0, Qt.ItemDataRole.UserRole)
+            if path_str:
+                try:
+                    path = Path(path_str)
+                    # If it's a directory, toggle its expansion state
+                    if path.is_dir():
+                        is_expanded = item.isExpanded()
+                        item.setExpanded(not is_expanded)
+                        logger.trace(f"Toggled expansion for directory '{item.text(0)}' via click.")
+                        # Prevent the double-click from also firing immediately after? (Optional)
+                        # QApplication.processEvents() # Might help, might cause issues. Test if needed.
+
+                    # If it was a file click on column 0, do nothing extra here.
+                    # The default selection behavior will still happen.
+
+                except Exception as e:
+                    logger.warning(f"Error processing click on tree item {item.text(0)}: {e}")
 
     @Slot()
     def handle_new_file(self):
@@ -152,10 +181,7 @@ class WorkspaceActionHandler(QObject):
             if path.is_file():
                 logger.debug(f"Tree item activated: Loading file {path.name}")
                 editor = self._workspace_manager.load_file(path, self._tab_widget)
-                if editor: self._connect_current_editor_signals() # Connect signals when loaded this way too
-            elif path.is_dir():
-                 is_expanded = item.isExpanded()
-                 item.setExpanded(not is_expanded)
+                if editor: self._connect_current_editor_signals()
 
 
     @Slot(int)

@@ -1,7 +1,7 @@
 # pm/core/model_list_service.py
-from PySide6.QtCore import QObject, Signal, Slot, QThread
+from PySide6.QtCore import QObject, Signal, Slot, QThread, QTimer # Added QTimer
 from loguru import logger
-from typing import List, Optional, Any, Dict # Added Dict
+from typing import List, Optional, Any, Dict
 
 from .model_registry import list_models
 
@@ -73,10 +73,10 @@ class ModelListService(QObject):
 
     def _cleanup_thread(self, provider_type: str):
         """Safely requests stop and cleans up a worker/thread pair for a specific type."""
-        thread = self._active_threads.get(provider_type) # Use .get() to avoid KeyError if already removed
+        thread = self._active_threads.get(provider_type)
         worker = self._active_workers.get(provider_type)
 
-        # --- Disconnect signals FIRST to prevent dangling connections ---
+        # Disconnect signals FIRST
         if worker:
             try: worker.models_ready.disconnect(self._handle_worker_models_ready)
             except RuntimeError: pass
@@ -84,20 +84,20 @@ class ModelListService(QObject):
             except RuntimeError: pass
             try: worker.finished.disconnect(self._handle_worker_finished)
             except RuntimeError: pass
-            # Also disconnect the connection to thread.quit if it exists
             try: worker.finished.disconnect(thread.quit)
-            except (RuntimeError, TypeError): pass # TypeError if thread is None
+            except (RuntimeError, TypeError): pass
+            # We don't explicitly disconnect worker.deleteLater connection
 
         if thread:
              # Disconnect thread signals
-            try: thread.finished.disconnect(self._cleanup_references)
+            try: thread.finished.disconnect(self._schedule_reference_cleanup) # Disconnect new slot
             except RuntimeError: pass
             try: thread.finished.disconnect(thread.deleteLater)
             except RuntimeError: pass
-            try: thread.started.disconnect(worker.run) # worker might be None here
+            try: thread.started.disconnect(worker.run)
             except (RuntimeError, TypeError): pass
 
-        # --- Now handle thread shutdown ---
+        # Now handle thread shutdown
         if thread and thread.isRunning():
             logger.debug(f"ModelListService: Cleaning up previous thread for '{provider_type}'...")
             if worker:
@@ -113,10 +113,10 @@ class ModelListService(QObject):
         elif thread:
              logger.debug(f"ModelListService: Thread for '{provider_type}' already finished or not started.")
 
-        # --- Remove references AFTER potential cleanup ---
-        self._active_threads.pop(provider_type, None)
-        self._active_workers.pop(provider_type, None)
-        logger.debug(f"ModelListService: References for '{provider_type}' removed.")
+        # --- References are now removed in _cleanup_references via QTimer ---
+        # self._active_threads.pop(provider_type, None) # REMOVED FROM HERE
+        # self._active_workers.pop(provider_type, None) # REMOVED FROM HERE
+        # logger.debug(f"ModelListService: References for '{provider_type}' *will be removed* after thread finishes.")
 
 
     @Slot(str, str, str)
@@ -140,7 +140,7 @@ class ModelListService(QObject):
         # --- Connect Worker Signals ---
         worker.models_ready.connect(self._handle_worker_models_ready)
         worker.error_occurred.connect(self._handle_worker_error)
-        worker.finished.connect(self._handle_worker_finished) # Still useful for logging perhaps
+        worker.finished.connect(self._handle_worker_finished)
 
         # --- Connect Thread Lifecycle Signals ---
         thread.started.connect(worker.run)
@@ -148,8 +148,8 @@ class ModelListService(QObject):
         worker.finished.connect(worker.deleteLater) # Worker cleans itself up
         thread.finished.connect(thread.deleteLater) # Thread cleans itself up *after* finishing
 
-        # --- *** Connect thread.finished to the NEW cleanup slot *** ---
-        thread.finished.connect(lambda pt=provider_type: self._cleanup_references(pt))
+        # --- Connect thread.finished to the *scheduling* slot ---
+        thread.finished.connect(lambda pt=provider_type: self._schedule_reference_cleanup(pt))
 
         thread.start()
         logger.debug(f"ModelListService: Started background thread for {provider_type} refresh ({thread.objectName()}).")
@@ -172,17 +172,23 @@ class ModelListService(QObject):
 
     @Slot(str)
     def _handle_worker_finished(self, provider_type: str):
-        """Internal slot called when a worker's finished signal is emitted.
-           *** DO NOT REMOVE REFERENCES HERE ANYMORE *** """
+        """Internal slot called when a worker's finished signal is emitted."""
         logger.debug(f"ModelListService: Worker task finished signal received for {provider_type}.")
-        # No longer responsible for removing references here.
+        # No reference cleanup here.
 
-    # --- *** NEW SLOT *** ---
+    # --- NEW SLOT ---
     @Slot(str)
+    def _schedule_reference_cleanup(self, provider_type: str):
+        """Schedules the final reference cleanup using a QTimer."""
+        logger.debug(f"ModelListService: Thread finished signal received for '{provider_type}'. Scheduling reference cleanup.")
+        QTimer.singleShot(0, lambda: self._cleanup_references(provider_type))
+
+    # --- Renamed original cleanup ---
     def _cleanup_references(self, provider_type: str):
-        """Slot connected to thread.finished to safely remove references."""
-        logger.debug(f"ModelListService: Thread finished signal received for '{provider_type}'. Cleaning up references.")
-        # It's now safe to remove the references because the thread has fully stopped.
+        """Slot called via QTimer to safely remove references *after* thread.finished event processing."""
+        logger.debug(f"ModelListService: Deleting references for '{provider_type}'.")
+        # It's now safer to remove the references because the thread has fully stopped,
+        # and deleteLater should have had a chance to be processed by the event loop.
         if provider_type in self._active_threads:
             del self._active_threads[provider_type]
         if provider_type in self._active_workers:
@@ -201,5 +207,5 @@ class ModelListService(QObject):
     @Slot()
     def stop_all_refreshes(self):
          logger.info("ModelListService: Requesting stop for ALL active refreshes...")
-         for provider_type in list(self._active_threads.keys()):
-              self._cleanup_thread(provider_type)
+         for provider_type in list(self._active_threads.keys()): # Iterate over a copy of keys
+              self._cleanup_thread(provider_type) # This will now just request stop

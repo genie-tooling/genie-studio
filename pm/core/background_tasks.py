@@ -43,6 +43,12 @@ class Worker(QObject):
         logger.debug("Worker initialized.")
 
     # --- Add this method ---
+    def assign_thread(self, thread: QThread):
+        """Stores a reference to the thread this worker will run on."""
+        logger.debug(f"Worker: Assigning thread {thread.objectName()}")
+        self._current_thread = thread
+    # --- End Added method ---
+
     @Slot()
     def request_interruption(self):
         """Sets the internal interruption flag."""
@@ -53,10 +59,10 @@ class Worker(QObject):
         """Checks the internal flag and the owning thread's request."""
         if self._interruption_requested_flag:
             return True
-        # Fallback to check thread directly if needed, though flag should be primary
-        if self._current_thread is None:
-            self._current_thread = QThread.currentThread()
-        return self._current_thread and self._current_thread.isInterruptionRequested()
+        # Check thread directly using the stored reference
+        # Use QThread.currentThread() as a fallback if reference wasn't set (shouldn't happen now)
+        thread_to_check = self._current_thread if self._current_thread else QThread.currentThread()
+        return thread_to_check and thread_to_check.isInterruptionRequested()
 
     # --- Helper Methods for Context Gathering (Add checks) ---
     def _gather_tree_context(self, available_tokens: int) -> tuple[List[str], int]:
