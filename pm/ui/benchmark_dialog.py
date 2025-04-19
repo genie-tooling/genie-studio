@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QDialog, QListWidget, QDialogButtonBox, QVBoxLayout, QTextEdit
+from PyQt6.QtWidgets import QDialog, QListWidget, QDialogButtonBox, QVBoxLayout, QTextEdit
 
 class BenchmarkDialog(QDialog):
     def __init__(self, models, runner):

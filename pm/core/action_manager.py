@@ -1,13 +1,13 @@
 # pm/core/action_manager.py
 from typing import Optional
-from PySide6.QtCore import QObject, Slot, QUrl
-from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import QMainWindow, QMenuBar, QApplication, QPlainTextEdit
+from PyQt6.QtCore import QObject, pyqtSlot, QUrl
+from PyQt6.QtGui import QAction, QKeySequence
+from PyQt6.QtWidgets import QMainWindow, QMenuBar, QApplication, QPlainTextEdit
 from loguru import logger
 import qtawesome as qta
 
 from ..core.logging_setup import LOG_PATH # For log action tooltip
-from PySide6.QtGui import QDesktopServices  # For log action handler
+from PyQt6.QtGui import QDesktopServices  # For log action handler
 
 class ActionManager(QObject):
     """Creates and manages global QActions and menus."""
@@ -47,7 +47,7 @@ class ActionManager(QObject):
         self.about_action = QAction("&About PatchMind...", self._main_window, statusTip="Show About dialog", triggered=self._main_window.show_about_dialog) # Connect directly
         self.show_logs_action = QAction("Show &Log Directory", self._main_window, statusTip=f"Open log directory ({LOG_PATH})", triggered=self._main_window.show_log_directory) # Connect directly
 
-        # Connect standard edit actions to a helper slot
+        # Connect standard edit actions to a helper pyqtSlot
         self.undo_action.triggered.connect(lambda: self._call_editor_method('undo'))
         self.redo_action.triggered.connect(lambda: self._call_editor_method('redo'))
         self.cut_action.triggered.connect(lambda: self._call_editor_method('cut'))
@@ -109,7 +109,7 @@ class ActionManager(QObject):
         #    return current_tab_widget
         return None
 
-    @Slot(str)
+    @pyqtSlot(str)
     def _call_editor_method(self, method_name: str):
         """Calls a method on the currently focused editor."""
         editor = self._get_focused_editor()

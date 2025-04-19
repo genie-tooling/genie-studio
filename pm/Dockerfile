@@ -18,7 +18,7 @@ ENV PYTHONUNBUFFERED=1 \
     # Add Poetry to PATH
     PATH="$POETRY_HOME/bin:$PATH"
 
-# Install OS dependencies required for PySide6/Qt6 GUI applications
+# Install OS dependencies required for PyQt6/Qt6 GUI applications
 # Includes X11 libs, fontconfig (for finding fonts), dbus, opengl
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libx11-6 \

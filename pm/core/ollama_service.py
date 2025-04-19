@@ -17,7 +17,6 @@ class OllamaService:
              logger.exception(f"Failed to initialize Ollama client: {e}")
              self.client = None # Mark client as invalid
 
-
     def stream(self, prompt: str):
         if not self.client:
              logger.error("Ollama client not initialized. Cannot stream.")

@@ -1,6 +1,6 @@
 # pm/ui/controllers/status_bar_controller.py
-from PySide6.QtCore import QObject, Signal, Slot, QTimer, Qt
-from PySide6.QtWidgets import QStatusBar, QLabel
+from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, QTimer, Qt
+from PyQt6.QtWidgets import QStatusBar, QLabel
 from loguru import logger
 from typing import Optional
 
@@ -27,8 +27,8 @@ class StatusBarController(QObject):
         self._status_bar.addPermanentWidget(self._token_label)
         logger.debug("StatusBarController: Widgets added.")
 
-    @Slot(str)
-    @Slot(str, int)
+    @pyqtSlot(str)
+    @pyqtSlot(str, int)
     def update_status(self, message: str, timeout: int = 0):
         """Updates the main status message, optionally clearing after a timeout."""
         logger.debug(f"StatusBar: Updating status: '{message}' (Timeout: {timeout}ms)")
@@ -47,7 +47,7 @@ class StatusBarController(QObject):
              self._status_label.setText("Ready.")
              logger.debug("StatusBar: Status cleared by timer.")
 
-    @Slot(int, int)
+    @pyqtSlot(int, int)
     def update_token_count(self, selected_tokens: int, max_tokens: int):
         """Updates the token count display."""
         self._current_max_tokens = max_tokens # Update stored limit
@@ -63,7 +63,7 @@ class StatusBarController(QObject):
         else:
             logger.error("StatusBarController: Token label is None, cannot update.")
 
-    @Slot(int)
+    @pyqtSlot(int)
     def update_token_limit(self, max_tokens: int):
         """Updates only the maximum token limit part of the display."""
         # This might be called when the limit changes but selection hasn't yet.

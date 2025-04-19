@@ -1,37 +1,36 @@
 # pm/core/background_tasks.py
-from PySide6.QtCore import QObject, Signal, Slot, QThread, Qt # Added Slot, QThread
+from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, QThread, Qt
 from loguru import logger
 from pathlib import Path
 import time
 import re
-import json # For parsing critic output
+import json
+import fnmatch
 from typing import List, Dict, Optional, Any
 
 from .token_utils import count_tokens
 from . import rag_service
 from .gemini_service import GeminiService
 from .ollama_service import OllamaService
-from .project_config import DEFAULT_CONFIG, get_effective_prompt # Use prompt getter
+from .project_config import DEFAULT_CONFIG, get_effective_prompt, DEFAULT_RAG_INCLUDE_PATTERNS, DEFAULT_RAG_EXCLUDE_PATTERNS
 
 RESERVE_FOR_IO = 1024
-MAX_CRITIC_LOOPS = 3 # Maximum revisions by critic
+MAX_CRITIC_LOOPS = 3
+# --- Increased buffer for binary check ---
+BINARY_CHECK_BUFFER_SIZE = 1024
+# --- Threshold for non-text characters indicating binary ---
+BINARY_THRESHOLD = 0.10 # 10% non-text chars might indicate binary
 
 class Worker(QObject):
-    """
-    Performs context gathering and LLM streaming in a separate thread.
-    Includes Plan-Critic-Executor workflow and direct execution mode.
-    Designed to be moved to a QThread. Includes interrupt handling.
-    """
-    status_update = Signal(str)
-    context_info = Signal(int, int)  # used_tokens, max_tokens
-    stream_chunk = Signal(str)       # Final executor output chunk
-    stream_error = Signal(str)
-    stream_finished = Signal()       # Indicates normal or stopped completion
-
-    # Optional signals for intermediate workflow steps
-    plan_generated = Signal(list)
-    plan_critiqued = Signal(dict)
-    plan_accepted = Signal(list)
+    # (pyqtSignals remain the same)
+    status_update = pyqtSignal(str)
+    context_info = pyqtSignal(int, int)
+    stream_chunk = pyqtSignal(str)
+    stream_error = pyqtSignal(str)
+    stream_finished = pyqtSignal()
+    plan_generated = pyqtSignal(list)
+    plan_critiqued = pyqtSignal(dict)
+    plan_accepted = pyqtSignal(list)
 
     def __init__(self,
                  settings: dict,
@@ -39,671 +38,397 @@ class Worker(QObject):
                  main_services: dict,
                  checked_file_paths: List[Path],
                  project_path: Path,
-                 disable_critic: bool): # <<< ADDED disable_critic flag <<<
+                 disable_critic: bool,
+                 resolved_context_limit: int):
         super().__init__()
         self.settings = settings
         self.history = history
         self.model_service: Optional[OllamaService | GeminiService] = main_services.get('model_service')
         self.summarizer_service: Optional[OllamaService | GeminiService] = main_services.get('summarizer_service')
-        self.checked_file_paths = checked_file_paths
+        self.checked_paths = checked_file_paths
         self.project_path = project_path
-        self.disable_critic_workflow = disable_critic # <<< STORE FLAG <<<
+        self.disable_critic_workflow = disable_critic
+        self.resolved_context_limit = resolved_context_limit
         self._current_thread : Optional[QThread] = None
-        self._interruption_requested_flag = False # Internal flag
-        logger.debug(f"Worker initialized (Critic Disabled: {self.disable_critic_workflow}).")
+        logger.debug(f"Worker initialized (Critic Disabled: {self.disable_critic_workflow}, Limit: {self.resolved_context_limit}).")
 
     def assign_thread(self, thread: QThread):
-        """Stores a reference to the thread this worker will run on."""
         logger.debug(f"Worker: Assigning thread {thread.objectName()}")
         self._current_thread = thread
 
-    @Slot()
+    @pyqtSlot()
     def request_interruption(self):
-        """Sets the internal interruption flag."""
-        logger.debug("Worker: Interruption flag set.")
-        self._interruption_requested_flag = True
+        logger.debug("Worker: Interruption requested via pyqtSlot.")
+        if self._current_thread: self._current_thread.requestInterruption()
+        else: logger.warning("Worker: Cannot request interruption, owning thread missing.")
 
     def _is_interruption_requested(self) -> bool:
-        """Checks the internal flag and the owning thread's request."""
-        if self._interruption_requested_flag:
-            return True
-        thread_to_check = self._current_thread if self._current_thread else QThread.currentThread()
+        thread_to_check = self._current_thread or QThread.currentThread()
         return thread_to_check and thread_to_check.isInterruptionRequested()
 
-    def _gather_context(self, max_tokens: int) -> tuple[dict, int, int]:
-        """Gathers all context types based on settings and checked files."""
+    def _gather_context(self, max_tokens_ignored: int) -> tuple[dict, int, int]:
         logger.debug("Worker: Starting context gathering.")
+        max_limit = self.resolved_context_limit
+        logger.info(f"Worker: Using resolved context limit: {max_limit}")
         total_context_tokens = 0
-        # Reserve tokens for input/output formatting and potential LLM overhead
-        available_tokens = max(0, max_tokens - RESERVE_FOR_IO - 500)
+        available_tokens = max(0, max_limit - RESERVE_FOR_IO - 500)
         context_parts = {'code': [], 'local': [], 'remote': []}
-        original_query = ""
-        chat_history_str = ""
+        original_query = ""; chat_history_str = ""
 
-        # --- Extract User Query and Format History ---
-        # Find latest user query
+        # Extract Query & History (same as before)
         for i in range(len(self.history) - 1, -1, -1):
-             if self.history[i].get('role') == 'user':
-                  original_query = self.history[i].get('content', '').strip()
-                  break
-        if not original_query:
-             logger.error("Worker: Could not find user query in history.")
-             raise ValueError("User query not found in history snapshot.")
-
-        # Format history string (excluding last user query for context)
-        history_str_parts = []
-        last_user_idx = -1
+            if self.history[i].get('role') == 'user': original_query = self.history[i].get('content', '').strip(); break
+        if not original_query: raise ValueError("User query not found.")
+        history_str_parts = []; last_user_idx = -1
         for i in range(len(self.history) - 1, -1, -1):
-             if self.history[i].get('role') == 'user':
-                  last_user_idx = i
-                  break
-        # Include messages up to (but not including) the last user message
+            if self.history[i].get('role') == 'user': last_user_idx = i; break
         limit = last_user_idx if last_user_idx != -1 else len(self.history)
         for msg in self.history[:limit]:
-             role = msg.get('role', 'System').capitalize()
-             content = msg.get('content', '').strip()
-             if content:
-                  history_str_parts.append(f"{role}:\n{content}")
+            role = msg.get('role', 'System').capitalize(); content = msg.get('content', '').strip()
+            if content: history_str_parts.append(f"{role}:\n{content}")
         chat_history_str = "\n---\n".join(history_str_parts) if history_str_parts else "[No previous conversation]"
-        # --------------------------------------------
 
-        if self._is_interruption_requested(): return {}, 0, 0 # Check early
+        if self._is_interruption_requested(): return {}, 0, max_limit
 
-        # --- Summarize for RAG if needed ---
-        search_query = original_query
-        summarizer_enabled = self.settings.get('rag_summarizer_enabled', False)
-        # Determine if any external source requiring summarization is enabled
-        external_rag_will_run = (
-            self.settings.get('rag_external_enabled', False) or
-            self.settings.get('rag_google_enabled', False) or
-            self.settings.get('rag_bing_enabled', False) or
-            self.settings.get('rag_stackexchange_enabled', False) or
-            self.settings.get('rag_github_enabled', False) or
-            self.settings.get('rag_arxiv_enabled', False)
-        )
+        # Summarize for RAG
+        search_query = original_query; summarizer_enabled = self.settings.get('rag_summarizer_enabled', False)
+        external_rag_will_run = any(self.settings.get(key, False) for key in ['rag_external_enabled','rag_google_enabled','rag_bing_enabled','rag_stackexchange_enabled','rag_github_enabled','rag_arxiv_enabled'])
         if summarizer_enabled and external_rag_will_run and self.summarizer_service:
              self.status_update.emit("Summarizing query for RAG...")
-             search_query = self._summarize_query(original_query) # Pass only the query
-             if self._is_interruption_requested(): return {}, 0, 0
-        # ------------------------------------
+             search_query = self._summarize_query(original_query) # Pass original query
+             if self._is_interruption_requested(): return {}, total_context_tokens, max_limit
 
-        # --- Gather RAG Contexts ---
+        # Gather RAG Contexts (same as before, check interruption)
         if external_rag_will_run and available_tokens > 0:
             self.status_update.emit("Fetching external RAG sources...")
             parts, tokens = self._gather_external_rag_context(search_query, available_tokens)
+            if self._is_interruption_requested(): return {}, total_context_tokens, max_limit
             if parts: context_parts['remote'] = parts
-            available_tokens = max(0, available_tokens - tokens)
-            total_context_tokens += tokens
+            available_tokens = max(0, available_tokens - tokens); total_context_tokens += tokens
             logger.info(f"External RAG used {tokens} tokens. Available: {available_tokens}")
-            if self._is_interruption_requested(): return {}, 0, 0
-        else:
-            logger.debug("Skipping external RAG fetch (disabled or no tokens).")
+        else: logger.debug("Skipping external RAG.")
 
         if self.settings.get('rag_local_enabled', False) and available_tokens > 0:
             self.status_update.emit("Fetching local RAG sources...")
             parts, tokens = self._gather_local_rag_context(available_tokens)
+            if self._is_interruption_requested(): return {}, total_context_tokens, max_limit
             if parts: context_parts['local'] = parts
-            available_tokens = max(0, available_tokens - tokens)
-            total_context_tokens += tokens
+            available_tokens = max(0, available_tokens - tokens); total_context_tokens += tokens
             logger.info(f"Local RAG sources used {tokens} tokens. Available: {available_tokens}")
-            if self._is_interruption_requested(): return {}, 0, 0
-        else:
-            logger.debug("Skipping local RAG sources fetch (disabled or no tokens).")
-        # ----------------------------
+        else: logger.debug("Skipping local RAG.")
 
-        # --- Gather Checked File Context ---
-        if self.checked_file_paths and available_tokens > 0:
-             self.status_update.emit("Gathering checked file context...")
-             parts, tokens = self._gather_tree_context(available_tokens)
+        # Gather Checked Path Context (same as before, check interruption)
+        if self.checked_paths and available_tokens > 0:
+             self.status_update.emit("Gathering checked file/directory context...")
+             parts, tokens = self._gather_checked_path_context(available_tokens)
+             if self._is_interruption_requested(): return {}, total_context_tokens, max_limit
              if parts: context_parts['code'] = parts
-             available_tokens = max(0, available_tokens - tokens)
-             total_context_tokens += tokens
-             logger.info(f"Checked file context used {tokens} tokens. Available: {available_tokens}")
-             if self._is_interruption_requested(): return {}, 0, 0
-        elif self.checked_file_paths:
-             logger.debug("Skipping checked file context (no tokens available).")
-        else:
-             logger.debug("Skipping checked file context (no files checked).")
-        # -------------------------------
+             available_tokens = max(0, available_tokens - tokens); total_context_tokens += tokens
+             logger.info(f"Checked path context used {tokens} tokens. Available: {available_tokens}")
+        else: logger.debug("Skipping checked path context.")
 
-        logger.info(f"Worker: Context gathering complete. Total tokens used for context: {total_context_tokens}")
+        logger.info(f"Worker: Context gathering complete. Total tokens used: {total_context_tokens}")
 
-        # Combine into final context dictionary for prompt formatting
+        # Prepare Final Context (same as before)
+        system_prompt_base = self.settings.get('system_prompt', DEFAULT_CONFIG['system_prompt'])
+        selected_prompt_ids = self.settings.get('selected_prompt_ids', [])
+        all_prompts = self.settings.get('user_prompts', []); prompts_by_id = {p['id']: p for p in all_prompts}
+        user_prompt_content_parts = []
+        for pid in selected_prompt_ids:
+             prompt_data = prompts_by_id.get(pid)
+             if prompt_data: user_prompt_content_parts.append(prompt_data['content'])
+        final_system_prompt = system_prompt_base
+        if user_prompt_content_parts: final_system_prompt += "\n\n--- User Instructions ---\n" + "\n\n".join(user_prompt_content_parts)
         final_context = {
             'query': original_query,
-            'code_context': "\n".join(context_parts.get('code', [])).strip() or "[No relevant code context provided]",
+            'code_context': "\n".join(context_parts.get('code', [])).strip() or "[No code context]",
             'chat_history': chat_history_str,
-            'rag_context': "\n\n".join(context_parts.get('remote', [])).strip() or "[No relevant external context provided]",
-            'local_context': "\n\n".join(context_parts.get('local', [])).strip() or "[No relevant local context provided]",
-            # Add other placeholders if needed by prompts
+            'rag_context': "\n\n".join(context_parts.get('remote', [])).strip() or "[No external context]",
+            'local_context': "\n\n".join(context_parts.get('local', [])).strip() or "[No local context]",
+            'system_prompt': final_system_prompt,
+            'user_prompts': "[User prompts integrated into system prompt]",
         }
+        self.context_info.emit(total_context_tokens, max_limit)
+        return final_context, total_context_tokens, max_limit
 
-        # Emit final token counts
-        self.context_info.emit(total_context_tokens, max_tokens)
-        return final_context, total_context_tokens, max_tokens
-
-
-    # --- Context Gathering Helpers (with interruption checks) ---
-    def _gather_tree_context(self, available_tokens: int) -> tuple[List[str], int]:
-        """Gathers context from files checked in the file tree."""
-        parts: List[str] = []
-        tokens_used: int = 0
-        files_processed: int = 0
+    # --- Context Gathering Helpers ---
+    def _gather_checked_path_context(self, available_tokens: int) -> tuple[List[str], int]:
+        # (Directory walking logic remains the same, uses _add_file_context which now checks for binary)
+        parts: List[str] = []; tokens_used: int = 0; files_processed: int = 0; dirs_processed: int = 0
         project_path: Path = self.project_path
-        logger.debug(f"Worker: Gathering Tree context for {len(self.checked_file_paths)} files (Budget: {available_tokens}).")
-
-        if not self.checked_file_paths:
-             return [], 0
-
-        for path in self.checked_file_paths:
-            if self._is_interruption_requested():
-                logger.info("Worker: Stop requested during Tree context.")
-                break # <<< CHECK
-
-            if available_tokens <= 0:
-                logger.info("Worker: Token budget reached during Tree context.")
-                break
-
-            if not path.is_file():
-                # Log skipped non-files if needed, but avoid clutter
-                # logger.trace(f"Skipping non-file item in tree context: {path}")
-                continue
-
+        max_depth = self.settings.get('rag_dir_max_depth', DEFAULT_CONFIG['rag_dir_max_depth'])
+        include_patterns = self.settings.get('rag_dir_include_patterns', DEFAULT_RAG_INCLUDE_PATTERNS)
+        exclude_patterns = self.settings.get('rag_dir_exclude_patterns', DEFAULT_RAG_EXCLUDE_PATTERNS)
+        exclude_patterns.extend(['*.patchmind.json', '.git/*'])
+        logger.debug(f"Worker: Gathering Checked Path context for {len(self.checked_paths)} items (Budget: {available_tokens}, Depth: {max_depth}).")
+        if not self.checked_paths: return [], 0
+        def should_include_file(filepath: Path) -> bool:
+            if not any(fnmatch.fnmatch(filepath.name, pattern) for pattern in include_patterns): return False
+            if any(fnmatch.fnmatch(filepath.name, pattern) for pattern in exclude_patterns): return False
             try:
-                # Basic size check before reading? Might save time on huge files.
-                # file_size = path.stat().st_size
-                # if file_size > 5 * 1024 * 1024: # Example limit
-                #     logger.warning(f"Skipping very large file in tree context: {path.name}")
-                #     continue
-
-                text = path.read_text(encoding='utf-8', errors='ignore')
-                if not text.strip(): # Skip empty files
-                    logger.trace(f"Skipping empty file in tree context: {path.name}")
-                    continue
-
-                # Determine relative path for markers
-                try:
-                    relative_path_str = str(path.relative_to(project_path))
-                except ValueError:
-                    relative_path_str = path.name # Fallback if not under project root
-
-                # Use File markers for context
-                header = f'### START FILE: {relative_path_str} ###'
-                footer = f'### END FILE: {relative_path_str} ###'
-                header_tok = count_tokens(header) + 1 # Approx newline token
-                snippet_tok = count_tokens(text)
-                footer_tok = count_tokens(footer) + 1 # Approx newline token
-                total_tok = header_tok + snippet_tok + footer_tok
-
-                if snippet_tok <= 0: continue # Skip if content has no tokens
-
-                if total_tok <= available_tokens:
-                    # Add full content
-                    parts.append(f'{header}\n{text}\n{footer}')
-                    available_tokens -= total_tok
-                    tokens_used += total_tok
-                    files_processed += 1
-                else:
-                    # Try to truncate
-                    needed_snippet_tokens = max(0, available_tokens - header_tok - footer_tok - 5) # -5 for safety
-                    if needed_snippet_tokens > 5: # Only truncate if we can fit a small amount
-                        ratio = needed_snippet_tokens / snippet_tok if snippet_tok > 0 else 0
-                        # Estimate character cutoff based on token ratio
-                        cutoff = int(len(text) * ratio)
-                        truncated_text = text[:cutoff].strip()
-                        # Recalculate tokens for the truncated part
-                        tok = count_tokens(truncated_text)
-                        final_total_tok = header_tok + tok + footer_tok
-
-                        if tok > 0 and final_total_tok <= available_tokens:
-                             parts.append(f'{header}\n{truncated_text}\n{footer}')
-                             available_tokens -= final_total_tok
-                             tokens_used += final_total_tok
-                             files_processed += 1
-                             logger.warning(f'Worker: Truncated Tree file {relative_path_str} ({tok} snippet tokens). Rem: {available_tokens}')
-                        else:
-                             # Even truncated version doesn't fit
-                             logger.warning(f"Could not fit even truncated content for {relative_path_str}. Skipping.")
-                             break # Stop processing further files if budget is too tight
-                    else:
-                         # Not enough space even for header/footer and minimal snippet
-                         logger.warning(f"Not enough token budget ({available_tokens}) to include even truncated header/footer for {relative_path_str}. Skipping.")
-                         break # Stop processing further files
-
-            except OSError as e:
-                logger.warning(f"Worker: OS Error reading Tree file {path}: {e}")
-            except Exception as e:
-                logger.warning(f"Worker: Failed to process Tree file {path}: {e}")
-
-        logger.info(f"Worker: Tree context complete. Added {files_processed} files. Tokens used by tree: {tokens_used}.")
+                relative_path_str = str(filepath.relative_to(project_path))
+                if any(fnmatch.fnmatch(relative_path_str, pattern) for pattern in exclude_patterns): return False
+            except ValueError: pass
+            return True
+        paths_to_process = list(self.checked_paths); processed_files_in_dirs = set()
+        while paths_to_process:
+            if self._is_interruption_requested(): break
+            if available_tokens <= 0: break
+            path = paths_to_process.pop(0)
+            try:
+                if path.is_file() and path not in processed_files_in_dirs:
+                    if should_include_file(path):
+                        # --- Pass to helper which now includes binary check ---
+                        available_tokens, tokens_added = self._add_file_context(path, available_tokens, parts)
+                        # -----------------------------------------------------
+                        if tokens_added > 0: tokens_used += tokens_added; files_processed += 1; processed_files_in_dirs.add(path)
+                    else: logger.trace(f"Skipping file (exclude pattern): {path.name}")
+                elif path.is_dir():
+                    dirs_processed += 1
+                    try: current_depth = len(path.relative_to(project_path).parts)
+                    except ValueError: current_depth = 0
+                    if current_depth > max_depth: logger.trace(f"Skipping dir (max depth): {path.name}"); continue
+                    logger.trace(f"Processing dir (Depth {current_depth}): {path.name}")
+                    try:
+                        for entry in path.iterdir():
+                             if self._is_interruption_requested(): break
+                             if any(fnmatch.fnmatch(entry.name, pattern) for pattern in exclude_patterns): logger.trace(f"Skipping entry (exclude): {entry.name}"); continue
+                             if entry.is_file() and entry not in processed_files_in_dirs: paths_to_process.append(entry)
+                             elif entry.is_dir(): paths_to_process.append(entry)
+                    except OSError as walk_err: logger.warning(f"Error iterating dir '{path}': {walk_err}")
+            except OSError as e: logger.warning(f"OS Error processing path {path}: {e}")
+            except Exception as e: logger.warning(f"Failed process path {path}: {e}")
+        logger.info(f"Checked Path context: Added {files_processed} files from {dirs_processed} dirs. Tokens: {tokens_used}.")
         return parts, tokens_used
 
-    def _summarize_query(self, original_query: str) -> str:
-        """Summarizes the query using the configured summarizer service."""
-        search_query = original_query if original_query is not None else ""
-        if not self.summarizer_service:
-            logger.warning("Worker: Summarizer service not available, skipping query summarization.")
-            return search_query
-
-        if self._is_interruption_requested():
-            logger.info("Worker interrupted before query summarization.")
-            return search_query # <<< CHECK
-
-        logger.debug(f"Worker: Attempting query summarization...")
-        # Format history for summarizer (might be simpler than main context)
-        # For now, let's omit history to keep it simple, adjust if needed
-        placeholders = {'current_query': original_query, 'chat_history': "[History not used in this version]"}
+    # --- MODIFIED: Add binary check ---
+    def _is_likely_binary(self, file_path: Path) -> bool:
+        """Heuristic check for binary files."""
         try:
-            # Use the prompt getter function
-            prompt = get_effective_prompt(self.settings, 'rag_summarizer_prompt_template', placeholders)
-            if not prompt:
-                 logger.error("Worker: Failed to format RAG summarizer prompt.")
-                 return search_query # Return original on format error
+            with open(file_path, 'rb') as f:
+                chunk = f.read(BINARY_CHECK_BUFFER_SIZE)
+            if not chunk: return False # Empty file is not binary
 
-            response = self.summarizer_service.send(prompt) # Use non-streaming for summarizer
-            if response is not None:
-                summarized = response.strip()
-                if summarized:
-                    search_query = summarized
-                    logger.info(f'Worker: Summarized query: "{search_query}"')
-                else:
-                    logger.warning("Worker: Summarizer returned empty response.")
+            # Count non-text characters (outside typical ASCII range + common control chars)
+            # This is a basic heuristic and might misclassify some text files or vice-versa
+            text_chars = bytes(range(32, 127)) + b'\n\r\t\f\b'
+            non_text_count = sum(1 for byte in chunk if byte not in text_chars)
+
+            ratio = non_text_count / len(chunk)
+            # logger.trace(f"Binary check for {file_path.name}: Ratio={ratio:.3f}")
+            return ratio > BINARY_THRESHOLD
+        except Exception as e:
+            logger.warning(f"Error during binary check for {file_path.name}: {e}")
+            return False # Err on the side of caution? Or assume not binary? Assume not binary for now.
+
+    def _add_file_context(self, file_path: Path, available_tokens: int, parts_list: List[str]) -> tuple[int, int]:
+        """Reads a file, adds its content to parts_list if tokens allow, returns remaining tokens and tokens added."""
+        # --- ADDED: Binary Check ---
+        if self._is_likely_binary(file_path):
+            logger.debug(f"Skipping likely binary file: {file_path.name}")
+            return available_tokens, 0
+        # --- END Binary Check ---
+
+        tokens_added = 0
+        try: relative_path_str = str(file_path.relative_to(self.project_path))
+        except ValueError: relative_path_str = file_path.name
+
+        try:
+            fsize = file_path.stat().st_size
+            if fsize > 5 * 1024 * 1024: logger.warning(f"Skipping large file: {file_path.name}"); return available_tokens, 0
+            text = file_path.read_text(encoding='utf-8', errors='ignore')
+            if not text: return available_tokens, 0
+            header = f'### START FILE: {relative_path_str} ###'; footer = f'### END FILE: {relative_path_str} ###'
+            header_tok = count_tokens(header) + 1; snippet_tok = count_tokens(text); footer_tok = count_tokens(footer) +1 ; total_tok = header_tok + snippet_tok + footer_tok
+            if snippet_tok <= 0: return available_tokens, 0
+            if total_tok <= available_tokens:
+                parts_list.append(f'{header}\n{text}\n{footer}'); available_tokens -= total_tok; tokens_added = total_tok
+                logger.trace(f"Added file '{relative_path_str}' ({tokens_added} tokens). Rem: {available_tokens}")
             else:
-                logger.warning("Worker: Summarizer returned None response.")
-        except Exception as e:
-            logger.error(f"Worker: Query summarization failed: {e}.")
-            self.stream_error.emit(f"Summarization failed: {e}")
-            search_query = original_query # Fallback
+                needed_snippet_tokens = max(0, available_tokens - header_tok - footer_tok - 5)
+                if needed_snippet_tokens > 5:
+                    ratio = needed_snippet_tokens / snippet_tok if snippet_tok > 0 else 0; cutoff = int(len(text) * ratio); truncated_text = text[:cutoff].strip()
+                    tok = count_tokens(truncated_text); final_total_tok = header_tok + tok + footer_tok
+                    if tok > 0 and final_total_tok <= available_tokens:
+                         parts_list.append(f'{header}\n{truncated_text}\n{footer}'); available_tokens -= final_total_tok; tokens_added = final_total_tok
+                         logger.warning(f'Truncated file {relative_path_str} ({tok} snippet tokens). Rem: {available_tokens}')
+        except OSError as e: logger.warning(f"OS Error reading file {file_path}: {e}")
+        except Exception as e: logger.warning(f"Failed process file {file_path}: {e}")
+        return available_tokens, tokens_added
 
-        return search_query if search_query is not None else ""
-
-    def _gather_external_rag_context(self, search_query: str, available_tokens: int) -> tuple[List[str], int]:
-        """Gathers context from enabled external RAG sources."""
-        parts: List[str] = []
-        tokens_used: int = 0
-        # Get settings for max results
-        max_results_per_source: int = self.settings.get('rag_max_results_per_source', 3)
-        max_ranked_results_to_use: int = self.settings.get('rag_max_ranked_results', 5)
-
-        logger.debug(f"Worker: Gathering External RAG (Budget: {available_tokens}). Query: '{search_query[:50]}...'")
+    # --- MODIFIED: Fix placeholder name ---
+    def _summarize_query(self, original_query: str) -> str:
+        search_query = original_query if original_query is not None else ""
+        if not self.summarizer_service: return search_query
+        if self._is_interruption_requested(): return search_query
+        logger.debug(f"Attempting query summarization...")
+        # --- FIX: Use 'original_query' key ---
+        placeholders = {'original_query': original_query, 'chat_history': "[History not used]"}
+        # -----------------------------------
         try:
-            if self._is_interruption_requested():
-                logger.info("Worker: Stop requested before external RAG fetch.")
-                return [], 0 # <<< CHECK
+            prompt = get_effective_prompt(self.settings, 'rag_summarizer_prompt_template', placeholders)
+            if not prompt: logger.error("Failed format RAG summarizer prompt."); return search_query # Error handled by get_effective_prompt now
+            response = self.summarizer_service.send(prompt)
+            if response: summarized = response.strip()
+            if summarized: search_query = summarized; logger.info(f'Summarized query: "{search_query}"')
+            else: logger.warning("Summarizer returned empty.")
+        except Exception as e: logger.error(f"Query summarization failed: {e}."); self.stream_error.emit(f"Summarization failed: {e}"); search_query = original_query
+        return search_query if search_query is not None else ""
+    # ------------------------------------
 
-            fetched_results = rag_service.fetch_external_sources_parallel(
-                search_query=search_query,
-                settings=self.settings,
-                max_results_per_source=max_results_per_source
-            )
-
-            if self._is_interruption_requested():
-                logger.info("Worker: Stop requested after external RAG fetch.")
-                return [], 0 # <<< CHECK
-
-            if not fetched_results:
-                logger.info("Worker: No raw results from external sources.")
-                return [], 0
-
-            if self._is_interruption_requested():
-                logger.info("Worker: Stop requested before external RAG ranking.")
-                return [], 0 # <<< CHECK
-
-            # Filter and rank results
-            ranked_results = rag_service.filter_and_rank_results(
-                results=fetched_results,
-                query=search_query,
-                max_results_to_return=max_ranked_results_to_use, # Pass limit here
-                settings=self.settings
-            )
-
-            if self._is_interruption_requested():
-                logger.info("Worker: Stop requested after external RAG ranking.")
-                return [], 0 # <<< CHECK
-
-            if not ranked_results:
-                logger.info("Worker: No external results passed ranking.")
-                return [], 0
-
-            logger.debug(f"Worker: Processing {len(ranked_results)} ranked external results...")
-            for result in ranked_results:
-                if self._is_interruption_requested():
-                    logger.info("Worker: Stop requested during External RAG formatting.")
-                    break # <<< CHECK
-
-                if available_tokens <= 0:
-                    logger.info("Worker: Token budget reached during Ext RAG formatting.")
-                    break
-
-                # Extract data safely using .get()
-                source = result.get('source','Web').capitalize()
-                title = result.get('title','N/A')
-                url = result.get('url','')
-                snippet = result.get('text_snippet','').strip()
-
+    # --- Other helpers (_gather_external_rag_context, _gather_local_rag_context, _call_llm) remain the same ---
+    # (Ensure they check _is_interruption_requested())
+    def _gather_external_rag_context(self, search_query: str, available_tokens: int) -> tuple[List[str], int]:
+        parts: List[str] = []; tokens_used: int = 0; max_res: int = self.settings.get('rag_max_results_per_source', 3); max_rank: int = self.settings.get('rag_max_ranked_results', 5)
+        logger.debug(f"Gathering External RAG (Budget: {available_tokens}). Query: '{search_query[:50]}...'")
+        try:
+            if self._is_interruption_requested(): return [], 0
+            fetched = rag_service.fetch_external_sources_parallel(search_query=search_query, settings=self.settings, max_results_per_source=max_res)
+            if self._is_interruption_requested(): return [], 0
+            if not fetched: return [], 0
+            if self._is_interruption_requested(): return [], 0
+            ranked = rag_service.filter_and_rank_results(results=fetched, query=search_query, max_results_to_return=max_rank, settings=self.settings)
+            if self._is_interruption_requested(): return [], 0
+            if not ranked: return [], 0
+            for result in ranked:
+                if self._is_interruption_requested(): break
+                if available_tokens <= 0: break
+                source=result.get('source','Web').capitalize(); title=result.get('title','N/A'); url=result.get('url',''); snippet=result.get('text_snippet','').strip()
                 if snippet:
-                    header=f'### External RAG: {source} - {title} ({url}) ###'
-                    footer='### End External RAG ###'
-                    h_tok=count_tokens(header); s_tok=count_tokens(snippet); f_tok=count_tokens(footer); total=h_tok+s_tok+f_tok
-
-                    if s_tok <= 0: continue # Skip empty snippets
-
-                    if total <= available_tokens:
-                        parts.append(f'{header}\n{snippet}\n{footer}')
-                        available_tokens -= total
-                        tokens_used += total
-                        logger.trace(f"Worker: Added Ext RAG '{title[:30]}' ({total} tokens). Rem: {available_tokens}")
+                    header=f'### RAG: {source} - {title} ({url}) ###'; footer='### End RAG ###'
+                    h, s, f = count_tokens(header), count_tokens(snippet), count_tokens(footer); total=h+s+f+2
+                    if s <= 0: continue
+                    if total <= available_tokens: parts.append(f'{header}\n{snippet}\n{footer}'); available_tokens -= total; tokens_used += total
                     else:
-                        # Try truncating
-                        needed=max(0, available_tokens - h_tok - f_tok - 10) # Safety margin
-                        if needed > 0:
-                            ratio = needed/s_tok if s_tok else 0
-                            cutoff=int(len(snippet)*ratio)
-                            trunc=snippet[:cutoff].strip()
-                            tok=count_tokens(trunc)
-                            final_total=h_tok+tok+f_tok
-                            if tok>0 and final_total<=available_tokens:
-                                parts.append(f'{header}\n{trunc}\n{footer}')
-                                available_tokens -= final_total
-                                tokens_used += final_total
-                                logger.warning(f'Worker: Truncated Ext RAG "{title[:30]}" ({tok} snippet tokens). Rem: {available_tokens}')
-                            else:
-                                logger.warning(f"Could not fit even truncated Ext RAG for {title[:30]}. Skipping.")
-                                break # Stop processing if budget tight
-                        else:
-                             logger.warning(f"Not enough token budget ({available_tokens}) for Ext RAG header/footer {title[:30]}. Skipping.")
-                             break # Stop processing
-
-        except Exception as e:
-             logger.exception("Worker: Error during External RAG fetching/processing")
-             self.stream_error.emit(f"External RAG Error: {e}")
-
-        logger.info(f"Worker: External RAG complete. Added {len(parts)} results. Tokens used here: {tokens_used}.")
+                        needed=max(0, available_tokens - h - f - 10)
+                        if needed > 5:
+                            ratio=needed/s if s else 0; cutoff=int(len(snippet)*ratio); trunc=snippet[:cutoff]; tok=count_tokens(trunc); final_total=h+tok+f+2
+                            if tok>0 and final_total<=available_tokens: parts.append(f'{header}\n{trunc}\n{footer}'); available_tokens -= final_total; tokens_used += final_total; logger.warning(f'Truncated Ext RAG "{title[:30]}" ({tok} tokens).')
+        except Exception as e: logger.exception("Error during External RAG"); self.stream_error.emit(f"External RAG Error: {e}")
+        logger.info(f"External RAG complete. Added {len(parts)} results. Tokens: {tokens_used}.")
         return parts, tokens_used
 
     def _gather_local_rag_context(self, available_tokens: int) -> tuple[List[str], int]:
-        """Gathers context from explicitly listed local RAG sources in settings."""
-        parts: List[str] = []
-        tokens_used: int = 0
-        sources_processed: int = 0
-        local_rag_sources = self.settings.get('rag_local_sources', []) # This is a list of dicts
-
-        logger.debug(f"Worker: Gathering Local RAG for {len(local_rag_sources)} sources (Budget: {available_tokens})...")
-        if not local_rag_sources:
-             return [], 0
-
-        for source_info in local_rag_sources:
-            if self._is_interruption_requested():
-                logger.info("Worker: Stop requested during Local RAG gathering.")
-                break # <<< CHECK
-
-            if available_tokens <= 0:
-                logger.info("Worker: Token budget reached during Local RAG gathering.")
-                break
-
-            # Check if source is enabled and has a path
-            if source_info.get('enabled', False):
-                path_str = source_info.get('path')
-                if not path_str:
-                     logger.warning("Worker: Skipping Local RAG source with no path.")
-                     continue
-
+        parts: List[str] = []; tokens_used: int = 0; processed: int = 0
+        sources = self.settings.get('rag_local_sources', [])
+        logger.debug(f"Gathering Local RAG for {len(sources)} sources (Budget: {available_tokens})...")
+        if not sources: return [], 0
+        for src_info in sources:
+            if self._is_interruption_requested(): break
+            if available_tokens <= 0: break
+            if src_info.get('enabled', False):
+                path_str = src_info.get('path');
+                if not path_str: continue
                 try:
                     path = Path(path_str).resolve()
                     if path.is_file():
-                        try:
-                            if self._is_interruption_requested(): break # <<< CHECK
-
+                         # --- ADDED: Binary Check ---
+                         if self._is_likely_binary(path):
+                              logger.debug(f"Skipping likely binary local RAG file: {path.name}")
+                              continue
+                         # --------------------------
+                         try:
+                            if self._is_interruption_requested(): break
                             text = path.read_text(encoding='utf-8', errors='ignore')
-                            if not text.strip():
-                                logger.trace(f"Worker: Skipping empty Local RAG file: {path.name}")
-                                continue
-
-                            # Use path_str from config for markers for clarity
-                            header = f'### Local RAG File: {path_str} ###'
-                            footer = '### End Local RAG File ###'
-                            h_tok=count_tokens(header); s_tok=count_tokens(text); f_tok=count_tokens(footer); total = h_tok + s_tok + f_tok
-
-                            if s_tok <= 0: continue
-
-                            if total <= available_tokens:
-                                parts.append(f'{header}\n{text}\n{footer}')
-                                available_tokens -= total
-                                tokens_used += total
-                                sources_processed += 1
-                                logger.trace(f"Worker: Added Local RAG file '{path.name}' ({total} tokens). Rem: {available_tokens}")
+                            if not text: continue
+                            header = f'### Local File: {path_str} ###'; footer = '### End Local File ###'
+                            h, s, f = count_tokens(header), count_tokens(text), count_tokens(footer); total = h + s + f + 2
+                            if s <= 0: continue
+                            if total <= available_tokens: parts.append(f'{header}\n{text}\n{footer}'); available_tokens -= total; tokens_used += total; processed += 1
                             else:
-                                # Try truncating
-                                needed = max(0, available_tokens - h_tok - f_tok - 10)
-                                if needed > 0:
-                                    ratio = needed / s_tok if s_tok else 0
-                                    cutoff = int(len(text) * ratio)
-                                    trunc = text[:cutoff].strip()
-                                    tok = count_tokens(trunc)
-                                    final_total = h_tok + tok + f_tok
-                                    if tok > 0 and final_total <= available_tokens:
-                                        parts.append(f'{header}\n{trunc}\n{footer}')
-                                        available_tokens -= final_total
-                                        tokens_used += final_total
-                                        sources_processed += 1
-                                        logger.warning(f'Worker: Truncated Local RAG file {path.name} ({tok} snippet tokens). Rem: {available_tokens}')
-                                    else:
-                                        logger.warning(f"Could not fit even truncated Local RAG for {path.name}. Skipping.")
-                                        break # Stop processing
-                                else:
-                                     logger.warning(f"Not enough token budget ({available_tokens}) for Local RAG header/footer {path.name}. Skipping.")
-                                     break # Stop processing
-                        except OSError as e:
-                            logger.warning(f"Worker: OS Error reading Local RAG file {path}: {e}")
-                        except Exception as e:
-                            logger.warning(f"Worker: Error processing Local RAG file {path}: {e}")
-                    elif path.is_dir():
-                        # Directory processing is not implemented here, handled by tree context if checked
-                        logger.trace(f"Worker: Skipping directory Local RAG source '{path_str}' (handled by tree context if checked).")
-                    else:
-                        logger.warning(f"Worker: Local RAG source path not valid file/dir: {path_str}")
-                except Exception as e:
-                    # Error resolving path or other unexpected issue
-                    logger.warning(f"Task: Failed to process Local RAG source '{path_str}': {e}")
-            else:
-                 # Source is not enabled
-                 logger.trace(f"Worker: Skipping disabled Local RAG source: {source_info.get('path', 'N/A')}")
-
-        logger.info(f"Worker: Local RAG complete. Processed {sources_processed} enabled sources. Tokens used here: {tokens_used}.")
+                                needed = max(0, available_tokens - h - f - 10)
+                                if needed > 5:
+                                    ratio=needed/s if s else 0; cutoff=int(len(text)*ratio); trunc=text[:cutoff]; tok=count_tokens(trunc); final_total=h+tok+f+2
+                                    if tok>0 and final_total<=available_tokens: parts.append(f'{header}\n{trunc}\n{footer}'); available_tokens -= final_total; tokens_used += final_total; processed += 1; logger.warning(f'Truncated Local RAG file {path.name} ({tok} tokens).')
+                         except OSError as e: logger.warning(f"OS Error reading Local RAG file {path}: {e}")
+                         except Exception as e: logger.warning(f"Error processing Local RAG file {path}: {e}")
+                    elif path.is_dir(): logger.warning(f"Dir processing for Local RAG source '{path_str}' not implemented.")
+                except Exception as e: logger.warning(f"Failed process Local RAG source '{path_str}': {e}")
+        logger.info(f"Local RAG complete. Processed {processed} sources. Tokens: {tokens_used}.")
         return parts, tokens_used
 
     def _call_llm(self, prompt: str, use_stream: bool = False):
-        """Helper to call the main LLM service, handling stream/non-stream."""
-        if not self.model_service:
-            raise ValueError("LLM model service is not available.")
-        if use_stream:
-            return self.model_service.stream(prompt)
-        else:
-            return self.model_service.send(prompt)
+        if not self.model_service: raise ValueError("LLM model service not available.")
+        if use_stream: return self.model_service.stream(prompt)
+        else: return self.model_service.send(prompt)
 
-    # --- Main Processing Method (Slot) ---
-    @Slot()
+    # --- process method remains the same, uses resolved limit from _gather_context ---
+    @pyqtSlot()
     def process(self):
         logger.info("Worker process started.")
-        stream_interrupted = False # Flag to track if stop happened during stream
-        final_plan = [] # Stores the plan that will eventually be executed
-
+        stream_interrupted = False; final_plan = []
         try:
-            # 1. Gather Context (Common Step)
-            if self._is_interruption_requested(): logger.info("Worker interrupted before context gathering."); return
+            if self._is_interruption_requested(): return
             self.status_update.emit("Gathering context...")
-            max_limit = self.settings.get('context_limit', DEFAULT_CONFIG['context_limit'])
-            context_data, context_tokens, max_tokens = self._gather_context(max_limit)
-            if self._is_interruption_requested(): logger.info("Worker interrupted after context gathering."); return
-
-
-            # 2. Check Workflow Path
+            context_data, context_tokens, max_tokens = self._gather_context(self.resolved_context_limit)
+            if self._is_interruption_requested(): return
             if self.disable_critic_workflow:
-                # --- Direct Execution Path ---
-                logger.info("Worker: Running DIRECT EXECUTION workflow.")
+                logger.info("Running DIRECT EXECUTION workflow.")
                 self.status_update.emit("Preparing direct execution prompt...")
-                direct_executor_prompt = get_effective_prompt(self.settings, 'direct_executor_prompt_template', context_data)
-                if not direct_executor_prompt: raise ValueError("Failed to format direct executor prompt.")
-
-                final_prompt_tokens = count_tokens(direct_executor_prompt)
-                logger.info(f"Direct Execution prompt tokens: {final_prompt_tokens} / {max_tokens}")
-                if final_prompt_tokens > max_tokens: logger.warning(f"Direct Execution prompt ({final_prompt_tokens} tokens) exceeds limit ({max_tokens}).")
-
-                if self._is_interruption_requested(): logger.info("Worker interrupted before direct execution."); return
+                prompt = get_effective_prompt(self.settings, 'direct_executor_prompt_template', context_data)
+                if not prompt: raise ValueError("Failed format direct executor prompt.")
+                prompt_tokens = count_tokens(prompt)
+                logger.info(f"Direct Exec prompt tokens: {prompt_tokens} / {max_tokens}")
+                if prompt_tokens > max_tokens: logger.warning(f"Direct Exec prompt ({prompt_tokens} tokens) exceeds limit ({max_tokens}).")
+                if self._is_interruption_requested(): return
                 self.status_update.emit("Executing directly...")
-                logger.debug("Worker: Starting Direct Executor stream...")
-
-                stream_generator = self._call_llm(direct_executor_prompt, use_stream=True)
-                for chunk in stream_generator:
+                stream = self._call_llm(prompt, use_stream=True)
+                for chunk in stream:
                     if self._is_interruption_requested(): stream_interrupted = True; break
                     self.stream_chunk.emit(chunk)
-                # --- End Direct Execution Path ---
-
             else:
-                # --- Plan-Critic-Executor Path ---
-                logger.info("Worker: Running PLAN-CRITIC-EXECUTOR workflow.")
-
-                # a. Call Planner
+                logger.info("Running PLAN-CRITIC-EXECUTOR workflow.")
+                if self._is_interruption_requested(): return
                 self.status_update.emit("Generating execution plan...")
-                planner_prompt = get_effective_prompt(self.settings, 'planner_prompt_template', context_data)
-                if not planner_prompt: raise ValueError("Failed to format planner prompt.")
-                if self._is_interruption_requested(): logger.info("Worker interrupted before planner call."); return
-
-                planner_response = self._call_llm(planner_prompt, use_stream=False)
-                if self._is_interruption_requested(): logger.info("Worker interrupted after planner call."); return
-
-                # Parse plan (simple newline split for now)
-                proposed_plan = [line.strip() for line in planner_response.strip().split('\n') if line.strip()]
-                logger.info(f"Worker: Proposed plan received:\n{proposed_plan}")
-                self.plan_generated.emit(proposed_plan) # Optional signal
-
-                # b. Critic Loop (MODIFIED LOGIC for RETRY)
-                current_plan = proposed_plan
-                final_plan = proposed_plan # Default to initial plan if loop finishes without acceptance
-                loop_count = 0
-                plan_accepted_by_critic = False # Flag to track if critic explicitly said GOOD
-
-                while loop_count < MAX_CRITIC_LOOPS:
-                    if self._is_interruption_requested(): logger.info("Worker interrupted during critic loop."); return
-                    self.status_update.emit(f"Critiquing plan (Attempt {loop_count + 1}/{MAX_CRITIC_LOOPS})...")
-
-                    critic_context = context_data.copy()
-                    # Format plan for prompt (numbered list string)
-                    critic_context['proposed_plan'] = "\n".join(f"{i+1}. {step}" for i, step in enumerate(current_plan))
-                    critic_prompt = get_effective_prompt(self.settings, 'critic_prompt_template', critic_context)
-                    if not critic_prompt: raise ValueError("Failed to format critic prompt.")
-
-                    critic_response_str = self._call_llm(critic_prompt, use_stream=False)
-                    if self._is_interruption_requested(): logger.info("Worker interrupted after critic call."); return
-
-                    # --- Modified JSON Parsing and Loop Control ---
-                    critic_response_valid = False # Assume invalid initially
-                    critic_data = None
-
+                prompt = get_effective_prompt(self.settings, 'planner_prompt_template', context_data)
+                if not prompt: raise ValueError("Failed format planner prompt.")
+                resp = self._call_llm(prompt, use_stream=False)
+                if self._is_interruption_requested(): return
+                proposed_plan = [ln.strip() for ln in resp.strip().split('\n') if ln.strip()]
+                logger.info(f"Proposed plan:\n{proposed_plan}"); self.plan_generated.emit(proposed_plan)
+                current_plan = proposed_plan; final_plan = proposed_plan; loop = 0
+                while loop < MAX_CRITIC_LOOPS:
+                    if self._is_interruption_requested(): return
+                    self.status_update.emit(f"Critiquing plan (Attempt {loop + 1}/{MAX_CRITIC_LOOPS})...")
+                    critic_ctx = context_data.copy(); critic_ctx['proposed_plan'] = "\n".join(f"{i+1}. {s}" for i, s in enumerate(current_plan))
+                    prompt = get_effective_prompt(self.settings, 'critic_prompt_template', critic_ctx)
+                    if not prompt: raise ValueError("Failed format critic prompt.")
+                    resp_str = self._call_llm(prompt, use_stream=False)
+                    if self._is_interruption_requested(): return
                     try:
-                        # Find JSON block in response
-                        json_match = re.search(r'```json\s*(\{.*?\})\s*```', critic_response_str, re.DOTALL | re.IGNORECASE)
-                        if not json_match:
-                             # Fallback: Assume the whole response is JSON if no markdown found
-                             json_match = re.search(r'^(\{.*?\})$', critic_response_str.strip(), re.DOTALL)
-
-                        if json_match:
-                             critic_response_json = json_match.group(1)
-                             critic_data = json.loads(critic_response_json)
-                             logger.debug(f"Worker: Critic JSON response parsed: {critic_data}")
-                             self.plan_critiqued.emit(critic_data) # Optional signal
-                             critic_response_valid = True # Mark as valid JSON
-                        else:
-                             # Keep critic_response_valid as False
-                             logger.error(f"Worker: Critic response did not contain expected JSON block (Loop {loop_count+1}). Response:\n{critic_response_str}")
-                             # Will retry if loops remain
-
-                    except json.JSONDecodeError as e:
-                         # Keep critic_response_valid as False
-                         logger.error(f"Worker: Failed to parse critic JSON response (Loop {loop_count+1}): {e}. Response:\n{critic_response_str}")
-                         # Will retry if loops remain
-                    except Exception as e:
-                         # Keep critic_response_valid as False
-                         logger.exception(f"Worker: Unexpected error processing critic response (Loop {loop_count+1}): {e}")
-                         # Will retry if loops remain
-
-
-                    # --- Process Valid Critic Response ---
-                    if critic_response_valid and critic_data:
-                        plan_status = critic_data.get('plan_status')
-                        critique_reasoning = critic_data.get('critique_reasoning', 'N/A')
-                        revised_plan = critic_data.get('revised_plan') # Should be list
-
-                        if plan_status == 'GOOD':
-                            logger.info(f"Worker: Plan accepted by critic (Loop {loop_count+1}). Reason: {critique_reasoning}")
-                            final_plan = current_plan # The plan submitted was good
-                            plan_accepted_by_critic = True
-                            self.plan_accepted.emit(final_plan) # Optional signal
-                            break # <<< EXIT LOOP: Plan is good
-
-                        elif plan_status == 'BAD':
-                            logger.warning(f"Worker: Plan rejected by critic (Loop {loop_count+1}). Reason: {critique_reasoning}")
-                            if revised_plan and isinstance(revised_plan, list) and revised_plan:
-                                logger.info(f"Worker: Critic provided revised plan:\n{revised_plan}")
-                                current_plan = revised_plan # Use the revision for the next loop iteration
-                                # Do not break, continue to next loop iteration
-                            else:
-                                logger.error("Worker: Critic rejected plan but provided no valid revision. Using last plan and exiting loop.")
-                                final_plan = current_plan # Use the plan that was just rejected
-                                break # <<< EXIT LOOP: Critic failed to revise
-                        else:
-                            logger.error(f"Worker: Critic returned unexpected status '{plan_status}' (Loop {loop_count+1}). Using current plan and exiting loop.")
-                            final_plan = current_plan
-                            break # <<< EXIT LOOP: Unexpected status
-
-                    # --- Increment Loop Count ---
-                    # Happens if:
-                    # 1. JSON was invalid/parsing failed
-                    # 2. Plan status was BAD and a valid revision was provided
-                    loop_count += 1
-                    # Wait a tiny bit before retrying on parse failure? Optional.
-                    # if not critic_response_valid: time.sleep(0.1)
-
-                # --- End of while loop ---
-                if not plan_accepted_by_critic: # If loop finished without explicit acceptance
-                    logger.warning(f"Worker: Critic loop finished after {loop_count} attempts without plan acceptance. Using last evaluated plan.")
-                    # final_plan already holds the last value of current_plan
-                    self.plan_accepted.emit(final_plan) # Emit the plan we're using
-
-                # c. Call Executor (using final_plan)
+                        match = re.search(r'```json\s*(\{.*?\})\s*```', resp_str, re.S|re.I) or re.search(r'^(\{.*?\})$', resp_str.strip(), re.S)
+                        if match: data = json.loads(match.group(1)); self.plan_critiqued.emit(data)
+                        else: logger.error(f"Critic JSON block not found. Resp:\n{resp_str}"); final_plan = current_plan; break
+                        status=data.get('plan_status'); reason=data.get('critique_reasoning','N/A'); revised=data.get('revised_plan')
+                        if status == 'GOOD': logger.info(f"Plan accepted. Reason: {reason}"); final_plan=current_plan; self.plan_accepted.emit(final_plan); break
+                        elif status == 'BAD':
+                            logger.warning(f"Plan rejected. Reason: {reason}")
+                            if revised and isinstance(revised, list) and revised: logger.info(f"Using revised plan:\n{revised}"); current_plan = revised; loop += 1
+                            else: logger.error("Critic rejected but no revision."); final_plan = current_plan; break
+                        else: logger.error(f"Unexpected critic status '{status}'."); final_plan = current_plan; break
+                    except json.JSONDecodeError as e: logger.error(f"Failed parse critic JSON: {e}. Resp:\n{resp_str}"); final_plan=current_plan; break
+                    except Exception as e: logger.exception(f"Error processing critic response: {e}"); final_plan=current_plan; break
+                if loop == MAX_CRITIC_LOOPS: logger.warning(f"Critic loop max attempts. Using last plan."); final_plan = current_plan; self.plan_accepted.emit(final_plan)
+                if self._is_interruption_requested(): return
                 self.status_update.emit("Executing final plan...")
-                executor_context = context_data.copy()
-                # Format final plan for prompt
-                executor_context['final_plan'] = "\n".join(f"{i+1}. {step}" for i, step in enumerate(final_plan))
-                executor_prompt = get_effective_prompt(self.settings, 'executor_prompt_template', executor_context)
-                if not executor_prompt: raise ValueError("Failed to format executor prompt.")
-
-                final_prompt_tokens = count_tokens(executor_prompt)
-                logger.info(f"Executor prompt tokens: {final_prompt_tokens} / {max_tokens}")
-                if final_prompt_tokens > max_tokens: logger.warning(f"Executor prompt ({final_prompt_tokens} tokens) exceeds limit ({max_tokens}).")
-
-                if self._is_interruption_requested(): logger.info("Worker interrupted before executor call."); return
-                logger.debug("Worker: Starting Executor stream...")
-
-                stream_generator = self._call_llm(executor_prompt, use_stream=True)
-                for chunk in stream_generator:
+                exec_ctx = context_data.copy(); exec_ctx['final_plan'] = "\n".join(f"{i+1}. {s}" for i, s in enumerate(final_plan))
+                prompt = get_effective_prompt(self.settings, 'executor_prompt_template', exec_ctx)
+                if not prompt: raise ValueError("Failed format executor prompt.")
+                prompt_tokens = count_tokens(prompt)
+                logger.info(f"Executor prompt tokens: {prompt_tokens} / {max_tokens}")
+                if prompt_tokens > max_tokens: logger.warning(f"Executor prompt ({prompt_tokens} tokens) exceeds limit ({max_tokens}).")
+                logger.debug("Starting Executor stream...")
+                stream = self._call_llm(prompt, use_stream=True)
+                for chunk in stream:
                     if self._is_interruption_requested(): stream_interrupted = True; break
                     self.stream_chunk.emit(chunk)
-                # --- End Plan-Critic-Executor Path ---
-
-            # 3. Final Logging
-            if stream_interrupted:
-                 logger.info("Worker: Stream finished due to interruption request.")
-            else:
-                 logger.info("Worker: Stream finished normally.")
-
+            if stream_interrupted: logger.info("Stream finished due to interruption.")
+            else: logger.info("Stream finished normally.")
         except Exception as e:
             logger.exception("Error occurred in worker process:")
-            if not self._is_interruption_requested():
-                 self.stream_error.emit(f"Worker Error: {type(e).__name__}: {e}")
-            else:
-                 logger.info(f"Worker error likely due to interruption request: {e}")
+            if not self._is_interruption_requested(): self.stream_error.emit(f"Worker Error: {type(e).__name__}: {e}")
+            else: logger.info(f"Worker error likely due to interruption: {e}")
         finally:
-            # Ensure finished signal is always emitted
-            logger.debug("Worker: Emitting finished signal from finally block.")
-            self.stream_finished.emit() # Emit to signal completion/cleanup needed
+            logger.debug("Worker: Emitting finished pyqtSignal.")
+            self.stream_finished.emit()
+

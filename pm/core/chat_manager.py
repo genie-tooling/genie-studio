@@ -1,5 +1,5 @@
 # pm/core/chat_manager.py
-from PySide6.QtCore import QObject, Signal
+from PyQt6.QtCore import QObject, pyqtSignal
 from loguru import logger
 import datetime
 import uuid
@@ -7,12 +7,12 @@ from typing import List, Dict, Optional
 
 class ChatManager(QObject):
     """Manages chat history state and logic."""
-    # Signals changes requiring UI update or full re-render
-    history_changed = Signal()
-    # Signals a specific message content update (for dynamic streaming)
-    message_content_updated = Signal(str, str) # message_id, full_content
-    # Signals when the history is truncated (e.g., after delete/edit)
-    history_truncated = Signal()
+    # pyqtSignals changes requiring UI update or full re-render
+    history_changed = pyqtSignal()
+    # pyqtSignals a specific message content update (for dynamic streaming)
+    message_content_updated = pyqtSignal(str, str) # message_id, full_content
+    # pyqtSignals when the history is truncated (e.g., after delete/edit)
+    history_truncated = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -60,7 +60,7 @@ class ChatManager(QObject):
         message = self._find_message_by_id(message_id)
         if message and message.get('role') == 'ai':
             message['content'] += chunk
-            # Emit specific update signal for dynamic UI update
+            # Emit specific update pyqtSignal for dynamic UI update
             self.message_content_updated.emit(message_id, message['content'])
         else:
              # Only log warning if ID was expected but not found/wrong role
@@ -71,9 +71,9 @@ class ChatManager(QObject):
         """Sets the final content for an AI message after streaming."""
         message = self._find_message_by_id(message_id)
         if message and message.get('role') == 'ai':
-             if message['content'] != final_content: # Avoid redundant signal if content unchanged
+             if message['content'] != final_content: # Avoid redundant pyqtSignal if content unchanged
                   message['content'] = final_content
-                  # Emit specific update signal ensures final content is rendered
+                  # Emit specific update pyqtSignal ensures final content is rendered
                   self.message_content_updated.emit(message_id, final_content)
                   logger.debug(f"ChatManager: Finalized AI message {message_id}")
              else:
@@ -82,7 +82,6 @@ class ChatManager(QObject):
              if message_id:
                 logger.warning(f"ChatManager: Could not find AI message {message_id} to finalize.")
 
-
     def delete_message_and_truncate(self, message_id: str):
         """Finds message by ID, removes it and all subsequent messages."""
         idx = next((i for i, m in enumerate(self.chat_history) if m.get('id') == message_id), -1)
@@ -90,8 +89,8 @@ class ChatManager(QObject):
             original_length = len(self.chat_history)
             self.chat_history = self.chat_history[:idx]
             logger.info(f"ChatManager: Deleted message {message_id} & truncated history from {original_length} to {len(self.chat_history)} items.")
-            self.history_truncated.emit() # Signal truncation happened
-            self.history_changed.emit() # Signal general change for re-render
+            self.history_truncated.emit() # pyqtSignal truncation happened
+            self.history_changed.emit() # pyqtSignal general change for re-render
         else:
              logger.warning(f"ChatManager: Cannot find message {message_id} to delete.")
 
@@ -101,7 +100,7 @@ class ChatManager(QObject):
         if message:
             message['content'] = new_content
             logger.info(f"ChatManager: Updated content for message {message_id}. New content: '{new_content[:50]}...'")
-            # history_changed signal emitted by truncate_history_after or add_ai_placeholder
+            # history_changed pyqtSignal emitted by truncate_history_after or add_ai_placeholder
             return True
         else:
             logger.warning(f"ChatManager: Cannot find message {message_id} to update content.")
@@ -120,7 +119,6 @@ class ChatManager(QObject):
              logger.debug("ChatManager: Emitted history_truncated and history_changed after truncation.")
         else:
              logger.warning(f"ChatManager: Cannot find message {message_id} to truncate after.")
-
 
     def get_history_snapshot(self) -> List[Dict]:
         """Returns a shallow copy of the current chat history."""

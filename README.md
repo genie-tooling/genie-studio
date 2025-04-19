@@ -19,6 +19,7 @@ PatchMind is an AI-enhanced code editor with inline LLM support, real-time promp
 - Python 3.11+
 - [Poetry](https://python-poetry.org/docs/#installation) (Recommended for development) or `pip`
 - An Ollama instance running (locally or via Docker)
+- PyQt6 and PyQt6-Qsci bindings
 
 ## 🚀 Running Locally
 
@@ -128,8 +129,8 @@ README.md               # This file
 ## 📋 Guidelines
 
 - Follows [PEP8](https://peps.python.org/pep-0008/) with `black` & `ruff`
-- Use `Signal/Slot` correctly with type annotations
-- Never modify the GUI from non-main threads — use signals
+- Use `pyqtSignal/pyqtSlot` correctly with type annotations
+- Never modify the GUI from non-main threads — use pyqtSignals
 - See `DEVELOPER_GUIDELINES.md` for more details.
 
 ## 📄 License

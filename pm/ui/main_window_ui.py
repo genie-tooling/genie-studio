@@ -1,9 +1,9 @@
 # pm/ui/main_window_ui.py
-from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QSplitter, QPlainTextEdit, QTreeWidget, QDockWidget,
                              QListWidget, QPushButton, QTabWidget, QLabel,
                              QHeaderView, QSizePolicy)
-from PySide6.QtCore import Qt
+from PyQt6.QtCore import Qt
 from loguru import logger
 import qtawesome as qta
 
@@ -15,7 +15,7 @@ from .change_queue_widget import ChangeQueueWidget
 class MainWindowUI:
     """
     Responsible for building the main UI widgets and layout,
-    but does not handle application logic or signals.
+    but does not handle application logic or pyqtSignals.
     """
     def __init__(self):
         logger.debug("Initializing MainWindowUI...")
@@ -49,7 +49,6 @@ class MainWindowUI:
         self.file_tree_widget.header().setStretchLastSection(False)
         self.file_tree_widget.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.file_tree_widget.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        # --- ADJUSTED TOKEN COLUMN SIZE ---
         self.file_tree_widget.header().resizeSection(1, 65) # Reduced size
         self.file_tree_widget.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         self.file_tree_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -100,12 +99,9 @@ class MainWindowUI:
         self.chat_area_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         # Column 4: Config Dock (Widget)
-        # ConfigDock is passed the current effective settings
-        # It now internally creates the ChangeQueueWidget as well
         self.config_dock = ConfigDock(settings, main_window) # Pass main_window as parent
         self.config_dock.setObjectName("config_dock")
         self.config_dock.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Expanding)
-        # --- Store reference to the change queue widget created inside ConfigDock ---
         self.change_queue_widget = self.config_dock.change_queue_widget
 
         # Main Horizontal Splitter
@@ -116,22 +112,22 @@ class MainWindowUI:
         self.main_splitter.addWidget(self.config_dock) # Add the dock widget itself
         main_window.setCentralWidget(self.main_splitter)
 
-        # Initial Splitter Sizes (Consider moving sizes to settings?)
-        tree_width = 200
-        editor_width = 400
-        chat_width = 400
-        config_width = 280 # Slightly wider to accommodate change queue
-        self.main_splitter.setSizes([tree_width, editor_width, chat_width, config_width])
+        # --- UPDATED Initial Splitter Sizes based on NEW proportions ---
+        # Proportions: Tree=2.5/17.5, Editor=6/17.5, Chat=6/17.5, Config=3/17.5
+        # Calculated based on assumed initial total width of ~1280px
+        # ------------------------------------------------------------
+
         self.main_splitter.setCollapsible(0, False)
         self.main_splitter.setCollapsible(1, False)
         self.main_splitter.setCollapsible(2, False)
         self.main_splitter.setCollapsible(3, False)
+        # Keep existing stretch factors (influences resizing)
         self.main_splitter.setStretchFactor(1, 1) # Editor tab area
         self.main_splitter.setStretchFactor(2, 1) # Chat area
 
         logger.debug("MainWindowUI: UI setup complete.")
 
-    # --- Add Getters for key widgets ---
+    # --- Getters for key widgets ---
     @property
     def file_tree(self) -> QTreeWidget: return self.file_tree_widget
     @property

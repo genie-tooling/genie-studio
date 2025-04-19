@@ -1,12 +1,12 @@
 # pm/ui/change_queue_widget.py
-from PySide6.QtWidgets import (
+from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QPushButton, QListWidgetItem,
     QSizePolicy
 )
 # <<< Import QIcon >>>
-from PySide6.QtGui import QIcon
+from PyQt6.QtGui import QIcon
 # <<< Import QtCore elements >>>
-from PySide6.QtCore import Qt, Signal, Slot
+from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot
 from loguru import logger
 from pathlib import Path
 from typing import List, Dict, Optional # Keep Optional for Python hints
@@ -16,16 +16,16 @@ import qtawesome as qta # Import qtawesome
 class ChangeQueueWidget(QWidget):
     """UI widget to display and manage pending file changes."""
 
-    view_requested = Signal(dict)       # Emits the full change_data_dict
-    apply_requested = Signal(list)      # list[change_data_dict] (for batch apply button)
-    reject_requested = Signal(list)     # list[change_data_dict] (for batch reject button)
-    queue_status_changed = Signal(bool) # True if empty, False otherwise
+    view_requested = pyqtSignal(dict)       # Emits the full change_data_dict
+    apply_requested = pyqtSignal(list)      # list[change_data_dict] (for batch apply button)
+    reject_requested = pyqtSignal(list)     # list[change_data_dict] (for batch reject button)
+    queue_status_changed = pyqtSignal(bool) # True if empty, False otherwise
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("change_queue_widget")
         self._init_ui()
-        self._connect_signals()
+        self._connect_pyqtSignals()
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self); main_layout.setContentsMargins(0, 0, 0, 0); main_layout.setSpacing(5)
@@ -42,7 +42,7 @@ class ChangeQueueWidget(QWidget):
         main_layout.addLayout(button_layout); self.setLayout(main_layout)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
 
-    def _connect_signals(self):
+    def _connect_pyqtSignals(self):
         self.change_list.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.change_list.itemSelectionChanged.connect(self._update_button_states)
         self.apply_button.clicked.connect(self._on_apply_clicked)
@@ -50,8 +50,8 @@ class ChangeQueueWidget(QWidget):
 
     def is_empty(self) -> bool: return self.change_list.count() == 0
 
-    # <<< CORRECTED @Slot DECORATOR SIGNATURE >>>
-    @Slot(Path, str, str, str, int, int, str) # Use 'str' for Optional args here
+    # <<< CORRECTED @pyqtSlot DECORATOR SIGNATURE >>>
+    @pyqtSlot(Path, str, str, str, int, int, str) # Use 'str' for Optional args here
     def add_change(self,
                    file_path: Path,
                    proposed_content: str,
@@ -84,7 +84,7 @@ class ChangeQueueWidget(QWidget):
         logger.info(f"ChangeQueue: Added pending '{change_type}' change for {display_name} (ID: {change_id}, Confidence: {match_confidence})")
         if was_empty: self.queue_status_changed.emit(False); self._update_button_states()
 
-    @Slot(list)
+    @pyqtSlot(list)
     def remove_items(self, items_to_remove: List[QListWidgetItem]):
         # This function remains the same
         if not items_to_remove: return
@@ -99,12 +99,12 @@ class ChangeQueueWidget(QWidget):
         finally: self.change_list.blockSignals(False)
         is_now_empty = self.is_empty(); self.queue_status_changed.emit(is_now_empty); self._update_button_states()
 
-    @Slot(QListWidgetItem)
+    @pyqtSlot(QListWidgetItem)
     def _on_item_double_clicked(self, item: QListWidgetItem):
         change_data = item.data(Qt.ItemDataRole.UserRole)
         if isinstance(change_data, dict): logger.debug(f"ChangeQueue: View requested for {change_data.get('id')}"); self.view_requested.emit(change_data)
 
-    @Slot()
+    @pyqtSlot()
     def _on_apply_clicked(self):
         selected_items = self.change_list.selectedItems()
         if not selected_items: return
@@ -112,7 +112,7 @@ class ChangeQueueWidget(QWidget):
         if selected_data: logger.debug(f"ChangeQueue: Apply req for {len(selected_data)} items via button."); self.apply_requested.emit(selected_data)
         else: logger.warning("ChangeQueue: Apply clicked but no valid data.")
 
-    @Slot()
+    @pyqtSlot()
     def _on_reject_clicked(self):
         selected_items = self.change_list.selectedItems()
         if not selected_items: return
@@ -120,7 +120,7 @@ class ChangeQueueWidget(QWidget):
         if selected_data: logger.debug(f"ChangeQueue: Reject req for {len(selected_data)} items via button."); self.reject_requested.emit(selected_data)
         else: logger.warning("ChangeQueue: Reject clicked but no valid data.")
 
-    @Slot()
+    @pyqtSlot()
     def _update_button_states(self):
         """Enable/disable Apply/Reject based on selection."""
         has_selection = len(self.change_list.selectedItems()) > 0

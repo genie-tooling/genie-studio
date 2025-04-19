@@ -1,5 +1,5 @@
 # pm/core/model_list_service.py
-from PySide6.QtCore import QObject, Signal, Slot, QThread, QTimer # Added QTimer
+from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, QThread, QTimer # Added QTimer
 from loguru import logger
 from typing import List, Optional, Any, Dict
 
@@ -8,9 +8,9 @@ from .model_registry import list_models
 # --- Worker Class (remains the same) ---
 class ModelRefreshWorker(QObject):
     """Worker object to fetch models in a background thread."""
-    models_ready = Signal(str, list) # provider_type ('llm'/'summarizer'), models_list
-    error_occurred = Signal(str, str) # provider_type, error_message
-    finished = Signal(str) # provider_type
+    models_ready = pyqtSignal(str, list) # provider_type ('llm'/'summarizer'), models_list
+    error_occurred = pyqtSignal(str, str) # provider_type, error_message
+    finished = pyqtSignal(str) # provider_type
 
     def __init__(self, provider_type: str, provider_name: str, api_key: Optional[str]):
         super().__init__()
@@ -23,7 +23,7 @@ class ModelRefreshWorker(QObject):
     def assign_thread(self, thread: QThread):
         self._thread_ref = thread
 
-    @Slot()
+    @pyqtSlot()
     def run(self):
         """Fetch the models."""
         thread_id = self._thread_ref.objectName() if self._thread_ref else 'UnknownThread'
@@ -48,12 +48,11 @@ class ModelRefreshWorker(QObject):
             if not self._is_interrupted:
                 self.error_occurred.emit(self.provider_type, error_msg)
         finally:
-            logger.debug(f"ModelRefreshWorker ({self.provider_type} on {thread_id}): Emitting finished signal.")
+            logger.debug(f"ModelRefreshWorker ({self.provider_type} on {thread_id}): Emitting finished pyqtSignal.")
             self.finished.emit(self.provider_type)
 
     def request_interruption(self):
         self._is_interrupted = True
-
 
 # --- Service Class (Modified) ---
 class ModelListService(QObject):
@@ -61,9 +60,9 @@ class ModelListService(QObject):
     Manages background fetching of model lists for different providers.
     Encapsulates QThread/Worker logic.
     """
-    llm_models_updated = Signal(list)
-    summarizer_models_updated = Signal(list)
-    model_refresh_error = Signal(str, str) # provider_type, error_message
+    llm_models_updated = pyqtSignal(list)
+    summarizer_models_updated = pyqtSignal(list)
+    model_refresh_error = pyqtSignal(str, str) # provider_type, error_message
 
     def __init__(self, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -76,7 +75,7 @@ class ModelListService(QObject):
         thread = self._active_threads.get(provider_type)
         worker = self._active_workers.get(provider_type)
 
-        # Disconnect signals FIRST
+        # Disconnect pyqtSignals FIRST
         if worker:
             try: worker.models_ready.disconnect(self._handle_worker_models_ready)
             except RuntimeError: pass
@@ -89,8 +88,8 @@ class ModelListService(QObject):
             # We don't explicitly disconnect worker.deleteLater connection
 
         if thread:
-             # Disconnect thread signals
-            try: thread.finished.disconnect(self._schedule_reference_cleanup) # Disconnect new slot
+             # Disconnect thread pyqtSignals
+            try: thread.finished.disconnect(self._schedule_reference_cleanup) # Disconnect new pyqtSlot
             except RuntimeError: pass
             try: thread.finished.disconnect(thread.deleteLater)
             except RuntimeError: pass
@@ -118,8 +117,7 @@ class ModelListService(QObject):
         # self._active_workers.pop(provider_type, None) # REMOVED FROM HERE
         # logger.debug(f"ModelListService: References for '{provider_type}' *will be removed* after thread finishes.")
 
-
-    @Slot(str, str, str)
+    @pyqtSlot(str, str, str)
     def refresh_models(self, provider_type: str, provider_name: str, api_key: Optional[str] = None):
         if provider_type not in ['llm', 'summarizer']:
             logger.error(f"ModelListService: Invalid provider_type '{provider_type}' for refresh.")
@@ -137,55 +135,54 @@ class ModelListService(QObject):
         self._active_workers[provider_type] = worker
         worker.moveToThread(thread)
 
-        # --- Connect Worker Signals ---
+        # --- Connect Worker pyqtSignals ---
         worker.models_ready.connect(self._handle_worker_models_ready)
         worker.error_occurred.connect(self._handle_worker_error)
         worker.finished.connect(self._handle_worker_finished)
 
-        # --- Connect Thread Lifecycle Signals ---
+        # --- Connect Thread Lifecycle pyqtSignals ---
         thread.started.connect(worker.run)
         worker.finished.connect(thread.quit) # Worker finishing tells thread to stop its loop
         worker.finished.connect(worker.deleteLater) # Worker cleans itself up
         thread.finished.connect(thread.deleteLater) # Thread cleans itself up *after* finishing
 
-        # --- Connect thread.finished to the *scheduling* slot ---
+        # --- Connect thread.finished to the *scheduling* pyqtSlot ---
         thread.finished.connect(lambda pt=provider_type: self._schedule_reference_cleanup(pt))
 
         thread.start()
         logger.debug(f"ModelListService: Started background thread for {provider_type} refresh ({thread.objectName()}).")
 
-
-    @Slot(str, list)
+    @pyqtSlot(str, list)
     def _handle_worker_models_ready(self, provider_type: str, models: list):
-        """Internal slot to handle successful model list retrieval."""
+        """Internal pyqtSlot to handle successful model list retrieval."""
         logger.info(f"ModelListService: Received {len(models)} models for {provider_type}.")
         if provider_type == 'llm':
             self.llm_models_updated.emit(models)
         elif provider_type == 'summarizer':
             self.summarizer_models_updated.emit(models)
 
-    @Slot(str, str)
+    @pyqtSlot(str, str)
     def _handle_worker_error(self, provider_type: str, error_message: str):
-        """Internal slot to handle errors from the worker."""
+        """Internal pyqtSlot to handle errors from the worker."""
         logger.error(f"ModelListService: Received error for {provider_type}: {error_message}")
         self.model_refresh_error.emit(provider_type, error_message)
 
-    @Slot(str)
+    @pyqtSlot(str)
     def _handle_worker_finished(self, provider_type: str):
-        """Internal slot called when a worker's finished signal is emitted."""
-        logger.debug(f"ModelListService: Worker task finished signal received for {provider_type}.")
+        """Internal pyqtSlot called when a worker's finished pyqtSignal is emitted."""
+        logger.debug(f"ModelListService: Worker task finished pyqtSignal received for {provider_type}.")
         # No reference cleanup here.
 
-    # --- NEW SLOT ---
-    @Slot(str)
+    # --- NEW pyqtSlot ---
+    @pyqtSlot(str)
     def _schedule_reference_cleanup(self, provider_type: str):
         """Schedules the final reference cleanup using a QTimer."""
-        logger.debug(f"ModelListService: Thread finished signal received for '{provider_type}'. Scheduling reference cleanup.")
+        logger.debug(f"ModelListService: Thread finished pyqtSignal received for '{provider_type}'. Scheduling reference cleanup.")
         QTimer.singleShot(0, lambda: self._cleanup_references(provider_type))
 
     # --- Renamed original cleanup ---
     def _cleanup_references(self, provider_type: str):
-        """Slot called via QTimer to safely remove references *after* thread.finished event processing."""
+        """pyqtSlot called via QTimer to safely remove references *after* thread.finished event processing."""
         logger.debug(f"ModelListService: Deleting references for '{provider_type}'.")
         # It's now safer to remove the references because the thread has fully stopped,
         # and deleteLater should have had a chance to be processed by the event loop.
@@ -195,8 +192,7 @@ class ModelListService(QObject):
             del self._active_workers[provider_type]
         logger.debug(f"ModelListService: Cleaned up references for finished {provider_type} worker/thread.")
 
-
-    @Slot(str)
+    @pyqtSlot(str)
     def stop_refresh(self, provider_type: str):
          if provider_type in self._active_threads:
               logger.info(f"ModelListService: Requesting stop for '{provider_type}' refresh...")
@@ -204,7 +200,7 @@ class ModelListService(QObject):
          else:
               logger.warning(f"ModelListService: Stop requested for '{provider_type}', but no active refresh found.")
 
-    @Slot()
+    @pyqtSlot()
     def stop_all_refreshes(self):
          logger.info("ModelListService: Requesting stop for ALL active refreshes...")
          for provider_type in list(self._active_threads.keys()): # Iterate over a copy of keys

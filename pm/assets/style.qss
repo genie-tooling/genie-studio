@@ -121,7 +121,6 @@ QComboBox QAbstractItemView {
     color: #E0E0E0; /* --text-primary */
 }
 
-
 /* --- Buttons --- */
 QPushButton {
     background-color: #3C3C3C; /* --surface-elevated-01 */
@@ -355,7 +354,6 @@ ChatMessageWidget QPushButton:pressed {
     color: #FFFFFF;
 }
 
-
 /* --- Tabs --- */
 QTabWidget::pane {
     border: 1px solid #383838; /* --border-default */
@@ -410,7 +408,6 @@ QTabBar::close-button:hover {
 QTabBar::close-button:pressed {
      background-color: #686868;
 }
-
 
 /* --- Scrollbars --- */
 QScrollBar:vertical, QScrollBar:horizontal {

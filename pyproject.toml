@@ -1,21 +1,34 @@
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
 [tool.poetry]
 name = "patchmind-ide"
 version = "0.2.1"
 description = "PatchMind IDE with LLM chat, patch mode, and RAG"
-authors = ["Kal Aeolian <kal@example.com>"]
+authors = ["Kal Aeolian <xpanikal@gmahail.com>"]
 readme = "README.md"
 license = "MIT"
+packages = [
+    { include = "pm" }
+]
 
 [tool.poetry.dependencies]
-python = "^3.11"
-PySide6 = "^6.6.3"
+python = "~3.11"
+PyQt6 = "^6.6.3" # Use PyQt6
+PyQt6-Qsci = "^2.14" # Use PyQt6-Qsci
 loguru = "^0.7"
 google-generativeai = "^0.8.5"
-ollama = "^0.1.7"
+ollama = "^0.1.7" # Check for latest 0.1.x or 0.2.x
 tiktoken = "^0.6"
 markdown2 = "^2.4"
-qdarktheme = "^1.3"
-qtawesome = "^1.3"
+pyqtdarktheme = ">0.0.11" # Use a specific recent version
+qtawesome = "^1.3" # Use a specific recent version
+psutil = "^5.9" # Added for RAM check
+python-patch = "<2" # Added for patching feature
+pytest = "^8.3.5"
+duckduckgo-search = "^8.0.1"
+arxiv = "^2.2.0"
 
 [tool.poetry.group.dev.dependencies]
 black = "^24.3"

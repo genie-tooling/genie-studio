@@ -149,7 +149,6 @@ EXECUTOR_PROMPT_TEMPLATE = """You are the execution module for a coding assistan
 Provide *only* the direct result of executing the plan steps.
 """
 
-
 # --- Direct Executor Prompt (Critic Bypass) ---
 # Input: {query}, {code_context}, {chat_history}, {rag_context}, {local_context}, {user_prompts}
 DIRECT_EXECUTOR_PROMPT_TEMPLATE = """You are an expert coding assistant. Directly address the user's query using the provided context.
@@ -188,7 +187,6 @@ DIRECT_EXECUTOR_PROMPT_TEMPLATE = """You are an expert coding assistant. Directl
 **Output:**
 Provide *only* the direct response to the query (e.g., code, explanation, answer).
 """
-
 
 # --- RAG Summarizer Prompt ---
 # Input: {chat_history}, {current_query}

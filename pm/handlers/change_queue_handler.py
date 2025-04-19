@@ -1,415 +1,383 @@
 # pm/handlers/change_queue_handler.py
 import re
 import uuid
-import difflib # For matching
+import difflib
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
-from PySide6.QtCore import QObject, Slot, Qt, QTimer, Signal
-from PySide6.QtWidgets import QListWidgetItem, QMessageBox, QApplication # For finding item and messages
+from PyQt6.QtCore import QObject, pyqtSlot, Qt, QTimer
+from PyQt6.QtWidgets import QListWidgetItem, QMessageBox, QApplication
 from loguru import logger
 
-# Dependency Imports
 from ..ui.change_queue_widget import ChangeQueueWidget
 from ..ui.diff_dialog import DiffDialog
 from ..core.workspace_manager import WorkspaceManager
 from ..ui.controllers.status_bar_controller import StatusBarController
 
+# Import the patch library safely
+try:
+    import patch as patch_library
+    HAS_PATCH_LIB = True
+except ImportError:
+    HAS_PATCH_LIB = False
+    logger.warning("Optional library 'python-patch' not found. 'Apply as Patch' feature will be disabled.")
+
+def apply_patch(original_content: str, patch_str: str) -> Optional[str]:
+    """Attempts to apply a unified diff patch to the original content."""
+    if not HAS_PATCH_LIB:
+        logger.error("Patch application failed: 'python-patch' library not installed.")
+        return None
+    try:
+        # Ensure patch string is bytes
+        patch_bytes = patch_str.encode('utf-8')
+        # The library expects the original content as bytes as well
+        original_bytes = original_content.encode('utf-8')
+
+        patch_set = patch_library.fromstring(patch_bytes)
+        # The apply method modifies the original bytes in-place if successful,
+        # or returns False on failure. We need to pass a copy.
+        result = patch_set.apply(original_bytes) # Apply to original bytes
+
+        if result is not False: # Library returns False on failure, original bytes on success
+             # Decode result back to string (assuming utf-8)
+             logger.debug("Patch library apply() successful.")
+             return result.decode('utf-8')
+        else:
+             logger.warning("Patch application failed (patch library returned False). Hunks may not apply.")
+             return None
+    except Exception as e:
+        logger.exception(f"Error applying patch: {e}")
+        return None
 
 class ChangeQueueHandler(QObject):
     """Handles logic for the Change Queue (viewing, applying, rejecting)."""
 
-    # Signals emitted by this handler
-    view_requested = Signal(dict)       # Emits the full change_data_dict when view is requested
-    apply_requested = Signal(list)      # list[change_data_dict] (for batch apply button)
-    reject_requested = Signal(list)     # list[change_data_dict] (for batch reject button)
-
+    # --- FIX: Corrected constructor signature ---
     def __init__(self,
-                 widget: ChangeQueueWidget,         # 1st position (UI Widget)
-                 workspace: WorkspaceManager,     # 2nd position (Core Service)
-                 status_bar: StatusBarController, # 3rd position (Controller)
-                 parent: Optional[QObject] = None): # 4th position (or last)
-        """
-        Initializes the ChangeQueueHandler.
+                 widget: ChangeQueueWidget,
+                 workspace: WorkspaceManager,
+                 status_bar: StatusBarController,
+                 parent: Optional[QObject] = None):
+        super().__init__(parent)
+        if not isinstance(widget, ChangeQueueWidget): raise TypeError("widget must be ChangeQueueWidget")
+        if not isinstance(workspace, WorkspaceManager): raise TypeError("workspace must be WorkspaceManager")
+        if not isinstance(status_bar, StatusBarController): raise TypeError("status_bar must be StatusBarController")
 
-        Args:
-            widget: The ChangeQueueWidget UI element this handler manages.
-            workspace: The WorkspaceManager for file operations.
-            status_bar: The StatusBarController for showing messages.
-            parent: The optional parent QObject.
-        """
-        super().__init__(parent) # Pass parent to the superclass init
         self._widget = widget
         self._workspace = workspace
         self._status_bar = status_bar
-
-        # Connect signals from the UI widget right after initialization
-        self._connect_signals()
+        self._connect_pyqtSignals()
         logger.info("ChangeQueueHandler initialized.")
+    # --- End Signature Fix ---
 
-    def _connect_signals(self):
-        """Connect signals from the UI widget to handler slots."""
-        # Ensure self._widget exists before connecting
-        if not self._widget:
-            logger.error("ChangeQueueHandler: Cannot connect signals, widget is None.")
-            return
-
-        try:
-            # Connect signals emitted by ChangeQueueWidget to slots in this handler
-            self._widget.view_requested.connect(self._handle_view_request)
-            self._widget.apply_requested.connect(self._handle_apply_request) # Batch apply from button
-            self._widget.reject_requested.connect(self._handle_reject_request)
-            logger.debug("ChangeQueueHandler: UI widget signals connected.")
-        except AttributeError as e:
-             # This might happen if the widget is somehow invalid or missing expected signals
-             logger.error(f"ChangeQueueHandler: Error connecting signals - widget missing attribute? {e}")
-        except Exception as e:
-             # Catch any other unexpected errors during connection
-             logger.exception(f"ChangeQueueHandler: Unexpected error connecting signals: {e}")
+    def _connect_pyqtSignals(self):
+        self._widget.view_requested.connect(self._handle_view_request)
+        self._widget.apply_requested.connect(self._handle_apply_request)
+        self._widget.reject_requested.connect(self._handle_reject_request)
 
     def _find_original_block(self, original_lines: List[str], proposed_lines: List[str]) -> Tuple[int, int, str]:
-        """
-        Tries to find the start/end lines in original_lines that best match
-        the proposed_lines using difflib.SequenceMatcher.
-
-        Args:
-            original_lines: List of strings representing lines in the original file (without line endings).
-            proposed_lines: List of strings representing lines in the proposed content (without line endings).
-
-        Returns:
-            A tuple containing:
-            - start_line_index (int): The 0-based starting line index in the original file, or -1 if no match.
-            - end_line_index (int): The 0-based *inclusive* ending line index in the original file, or -1 if no match.
-            - confidence_level (str): 'partial' if a plausible match is found, 'none' otherwise.
-        """
+        """Finds the best matching block using SequenceMatcher and signature fallback."""
         if not proposed_lines or not original_lines:
-            logger.debug("Find Block: Empty input lines.")
-            return -1, -1, 'none'
+             return -1, -1, 'none'
 
-        # Use SequenceMatcher to find matching blocks
+        # SequenceMatcher Approach
         matcher = difflib.SequenceMatcher(None, original_lines, proposed_lines, autojunk=False)
+        match = matcher.find_longest_match(0, len(original_lines), 0, len(proposed_lines))
 
-        # get_matching_blocks() returns tuples of (i, j, n)
-        # where original_lines[i:i+n] == proposed_lines[j:j+n]
-        matching_blocks = matcher.get_matching_blocks()
+        if match.size > 0:
+            # Check for near-perfect match at the start of proposed content
+            if match.b == 0 and match.size >= len(proposed_lines) * 0.8:
+                 start_index = match.a; end_index = match.a + match.size - 1
+                 logger.debug(f"Found 'exact' block match via SM: Orig lines {start_index+1}-{end_index+1}")
+                 return start_index, end_index, 'exact'
 
-        # Filter out the 'junk' block at the end if present
-        if matching_blocks and matching_blocks[-1] == (len(original_lines), len(proposed_lines), 0):
-            matching_blocks = matching_blocks[:-1]
+            # Check overall ratio for partial match
+            ratio = matcher.ratio()
+            logger.debug(f"SequenceMatcher ratio: {ratio:.3f}")
+            if ratio > 0.6: # Threshold for considering it a 'partial' match
+                start_index = match.a; end_index = match.a + match.size - 1
+                logger.debug(f"Found 'partial' block match via SM ratio: Orig lines {start_index+1}-{end_index+1}")
+                return start_index, end_index, 'partial'
 
-        if not matching_blocks:
-            logger.warning("Find Block: No matching blocks found by difflib.")
-            return -1, -1, 'none'
+        # Signature Fallback (if SM fails or gives low confidence)
+        first_proposed_line = next((line for line in proposed_lines if line.strip()), None)
+        if first_proposed_line:
+            # Regex to find common definition starts (adjust as needed)
+            sig_match = re.match(r"^\s*(async\s+)?(def|class)\s+(\w+)\s*\(", first_proposed_line)
+            if sig_match:
+                signature_start = sig_match.group(0).strip() # Use the whole matched signature start
+                try:
+                    start_index = -1
+                    # Find the first line in original containing this signature start
+                    for i, line in enumerate(original_lines):
+                        if signature_start in line.strip(): # Simple containment check
+                            start_index = i; break
 
-        # Heuristic: Find the single longest matching block (`n` is max).
-        best_match = None
-        max_n = 0
-        for i, j, n in matching_blocks:
-            if n > max_n:
-                 max_n = n
-                 best_match = (i, j, n) # Store the block with the longest match
+                    if start_index != -1:
+                        # Try to find the block end based on indentation
+                        start_indent = len(original_lines[start_index]) - len(original_lines[start_index].lstrip())
+                        end_index = start_index
+                        for i in range(start_index + 1, len(original_lines)):
+                            line = original_lines[i];
+                            if not line.strip(): continue # Skip empty lines for indent check
+                            current_indent = len(line) - len(line.lstrip())
+                            # Stop if line is not empty and indent is less or equal
+                            if current_indent <= start_indent:
+                                end_index = i - 1 # Previous line was the end
+                                break
+                            end_index = i # Extend block to this line
+                        else: # If loop finished without break, block goes to end of file
+                            end_index = len(original_lines) - 1
 
-        # --- Thresholding ---
-        # Require a minimum match length and coverage ratio
-        min_match_length = 2 # Example: require at least 2 lines to match
-        min_coverage_ratio = 0.3 # Example: require match to cover at least 30% of proposed lines
+                        logger.debug(f"Found 'exact' block match via signature fallback: Orig lines {start_index+1}-{end_index+1}")
+                        return start_index, end_index, 'exact' # Treat signature match as 'exact'
+                except Exception as e:
+                    logger.error(f"Error during signature matching fallback: {e}")
 
-        if best_match and best_match[2] >= min_match_length:
-            i, j, n = best_match
-            coverage = n / len(proposed_lines) if len(proposed_lines) > 0 else 0
-
-            logger.debug(f"Find Block: Best match details - Original Start={i}, Proposed Start={j}, Length={n}, Coverage={coverage:.2f}")
-
-            if coverage >= min_coverage_ratio:
-                # We found a plausible block. Return its start/end in the *original* file.
-                original_start_line = i
-                original_end_line = i + n - 1 # Inclusive end index
-                logger.info(f"Find Block: Found plausible match via difflib. Original lines: {original_start_line + 1}-{original_end_line + 1}")
-                # Confidence is 'partial' as difflib finds similarities.
-                return original_start_line, original_end_line, 'partial'
-            else:
-                 logger.warning(f"Find Block: Longest match (n={n}) coverage ({coverage:.2f}) below threshold ({min_coverage_ratio}).")
-        else:
-            if best_match: logger.warning(f"Find Block: Longest match (n={best_match[2]}) below minimum length ({min_match_length}).")
-            else: logger.warning("Find Block: No suitable matching block identified by difflib heuristics.")
-
-        # If no plausible match met the criteria
+        logger.warning("Could not find matching block in original content.");
         return -1, -1, 'none'
 
-    @Slot(dict)
+    @pyqtSlot(dict)
     def _handle_view_request(self, change_data: Dict):
-        """Shows the DiffDialog for the selected change item."""
-        logger.debug(f"ChangeQueueHandler: Handling view request for change ID {change_data.get('id')}")
-
-        original_full_content = change_data.get('original_full_content')
+        logger.debug(f"CQH: Handling view request for change ID {change_data.get('id')}")
+        original_full_content = change_data.get('original_full_content');
         original_block_content = change_data.get('original_block_content')
-        original_start_line = change_data.get('original_start_line')
+        original_start_line = change_data.get('original_start_line');
         original_end_line = change_data.get('original_end_line')
-        proposed_content = change_data.get('proposed_content')
-        match_confidence = change_data.get('match_confidence') # Get confidence
+        proposed_content = change_data.get('proposed_content');
+        match_confidence = change_data.get('match_confidence')
 
         if original_full_content is None or proposed_content is None or match_confidence is None:
-             logger.error("View request missing essential data (full_content, proposed_content, or match_confidence).")
-             QMessageBox.warning(self._widget.window(),"View Error", "Could not display change: Missing essential data.")
+             logger.error("View request missing essential data.");
+             QMessageBox.warning(self._widget.window(),"View Error", "Could not display change: Missing data.");
              return
 
-        # Ensure line numbers are valid integers if not None
-        if original_start_line is not None and not isinstance(original_start_line, int):
-            logger.error(f"Invalid type for original_start_line: {type(original_start_line)}")
-            original_start_line = -1 # Fallback
-        if original_end_line is not None and not isinstance(original_end_line, int):
-            logger.error(f"Invalid type for original_end_line: {type(original_end_line)}")
-            original_end_line = -1 # Fallback
-
-        # Create and show the DiffDialog
         dialog = DiffDialog(
             original_full_content=original_full_content,
             original_block_content=original_block_content,
-            original_start_line=original_start_line if original_start_line is not None else -1,
-            original_end_line=original_end_line if original_end_line is not None else -1,
+            original_start_line=original_start_line,
+            original_end_line=original_end_line,
             proposed_content=proposed_content,
-            match_confidence=match_confidence, # Pass confidence ('partial' or 'none')
+            match_confidence=match_confidence,
             parent=self._widget.window()
         )
 
         if dialog.exec():
-            # Dialog was accepted (Apply Auto, Insert Here)
-            insertion_line = getattr(dialog, 'insertion_line', -1)
-            apply_mode = getattr(dialog, 'apply_mode', 'reject') # Get how dialog was accepted
+            insertion_line = getattr(dialog, 'insertion_line', -1);
+            apply_mode = getattr(dialog, 'apply_mode', 'reject')
+            logger.info(f"DiffDialog accepted. Apply mode: '{apply_mode}', Insertion line: {insertion_line}")
 
             if apply_mode == 'insert':
-                logger.info(f"DiffDialog accepted with 'Insert Here' at line {insertion_line + 1}.")
-                change_data['insertion_line'] = insertion_line
-                change_data['apply_type'] = 'insert' # Mark how to apply
+                change_data['insertion_line'] = insertion_line; change_data['apply_type'] = 'insert'
             elif apply_mode == 'auto_replace':
-                 logger.info("DiffDialog accepted with 'Apply Auto-Detected Change'.")
-                 change_data['apply_type'] = 'replace' # Mark how to apply
+                change_data['apply_type'] = 'replace'
+            elif apply_mode == 'patch':
+                change_data['apply_type'] = 'patch'
             else:
-                 logger.warning(f"DiffDialog accepted with unexpected mode '{apply_mode}'. Skipping apply.")
-                 return # Don't proceed if mode is unclear
+                logger.warning(f"DiffDialog accepted unexpected mode '{apply_mode}'. Assuming reject.");
+                return # Don't proceed if mode is unknown
 
-            # Trigger the apply logic for this single item
+            # Apply the single change determined by the dialog
             self._handle_apply_request([change_data])
         else:
-             # Dialog was rejected or closed
-             logger.info("DiffDialog closed or 'Reject Change' clicked.")
+            logger.info("DiffDialog closed or rejected.")
 
-    @Slot(list)
+    @pyqtSlot(list)
     def _handle_apply_request(self, selected_changes_data: List[Dict]):
-        """Attempts to apply the selected changes (handles replacement or insertion)."""
-        logger.info(f"ChangeQueueHandler: Handling apply request for {len(selected_changes_data)} changes.")
-        processed_ids = set()
-        items_to_remove = []
-
+        logger.info(f"CQH: Handling apply request for {len(selected_changes_data)} changes.")
+        processed_ids = set(); items_to_remove = []
         for change_data in selected_changes_data:
-            change_id = change_data.get('id')
-            file_path = change_data.get('file_path')
-            original_full_content = change_data.get('original_full_content')
-            proposed_content = change_data.get('proposed_content')
-            original_start_line = change_data.get('original_start_line', -1)
-            original_end_line = change_data.get('original_end_line', -1)
-            insertion_line = change_data.get('insertion_line', -1)
-            apply_type = change_data.get('apply_type', 'none') # Get apply type ('insert' or 'replace')
+            change_id = change_data.get('id'); file_path = change_data.get('file_path')
+            original_full_content = change_data.get('original_full_content'); proposed_content = change_data.get('proposed_content')
+            original_start_line = change_data.get('original_start_line', -1); original_end_line = change_data.get('original_end_line', -1)
+            insertion_line = change_data.get('insertion_line', -1); apply_type = change_data.get('apply_type', 'none')
 
-            if not change_id or not file_path or original_full_content is None or proposed_content is None or apply_type == 'none':
-                logger.warning(f"Skipping invalid change data for apply: ID={change_id}, Path={file_path}, ApplyType={apply_type}")
-                continue
+            if not all([change_id, file_path, original_full_content is not None, proposed_content is not None, apply_type != 'none']):
+                logger.warning(f"Skipping invalid change data for apply: {change_data.get('display_name')}"); continue
+            if change_id in processed_ids: continue
 
-            if change_id in processed_ids:
-                 logger.trace(f"Skipping already processed change ID {change_id}")
-                 continue
-
-            success = False
-            final_content = None
-
+            success = False; final_content = None
             try:
-                original_lines = original_full_content.splitlines(keepends=True)
-                proposed_lines = proposed_content.splitlines(keepends=True)
-
-                # Ensure proposed content has a trailing newline if original does
-                if original_lines and original_lines[-1].endswith(('\n','\r')):
-                    if not proposed_lines or not proposed_lines[-1].endswith(('\n','\r')):
-                         proposed_lines.append('\n') # Add newline if missing
+                orig_lines = original_full_content.splitlines(keepends=True)
+                prop_lines = proposed_content.splitlines(keepends=True)
+                # Ensure proposed content ends with newline if original did (helps diff/patch)
+                if orig_lines and orig_lines[-1].endswith(('\n','\r')) and prop_lines and not prop_lines[-1].endswith(('\n','\r')):
+                    prop_lines[-1] += '\n'
 
                 if apply_type == 'insert' and insertion_line != -1:
-                    # --- Insertion Logic ---
-                    logger.debug(f"Applying change {change_id} via INSERTION: File='{file_path.name}', Before Line {insertion_line+1}")
+                    logger.debug(f"Applying {change_id} via INSERTION: File='{file_path.name}', Line {insertion_line+1}")
                     # Clamp insertion index to valid range
-                    insert_at = max(0, min(insertion_line, len(original_lines)))
-                    new_content_lines = original_lines[:insert_at] + proposed_lines + original_lines[insert_at:]
-                    final_content = "".join(new_content_lines)
-                    success = True
+                    insert_at = max(0, min(insertion_line, len(orig_lines)));
+                    new_lines = orig_lines[:insert_at] + prop_lines + orig_lines[insert_at:]
+                    final_content = "".join(new_lines); success = True
 
                 elif apply_type == 'replace' and original_start_line != -1 and original_end_line != -1:
-                    # --- Replacement Logic ---
-                    logger.debug(f"Applying change {change_id} via REPLACEMENT: File='{file_path.name}', Lines {original_start_line+1}-{original_end_line+1}")
-                    start = max(0, original_start_line)
-                    # Use exclusive end index for slicing, calculated from inclusive end line
-                    end = min(len(original_lines), original_end_line + 1)
-                    if start >= end: # Check if range is valid
-                         raise ValueError(f"Invalid line range: Start index {start} >= End index {end} (Orig End Line: {original_end_line})")
+                    logger.debug(f"Applying {change_id} via REPLACEMENT: File='{file_path.name}', Lines {original_start_line+1}-{original_end_line+1}")
+                    start = max(0, original_start_line);
+                    end = min(len(orig_lines) -1 , original_end_line) # Use len-1 for index
+                    if start > end: raise ValueError(f"Invalid line range: {start+1}-{end+1}")
+                    new_lines = orig_lines[:start] + prop_lines + orig_lines[end + 1:]
+                    final_content = "".join(new_lines); success = True
 
-                    # Combine parts: before + proposed + after
-                    new_content_lines = original_lines[:start] + proposed_lines + original_lines[end:]
-                    final_content = "".join(new_content_lines)
-                    success = True
+                elif apply_type == 'patch':
+                    logger.debug(f"Applying {change_id} via PATCH: File='{file_path.name}'")
+                    if original_start_line == -1 or original_end_line == -1:
+                         logger.error(f"Cannot apply patch for {file_path.name}: Original block not identified."); success = False
+                    else:
+                         start = max(0, original_start_line);
+                         end = min(len(orig_lines) -1 , original_end_line)
+                         if start > end: raise ValueError(f"Invalid range for patch: {start+1}-{end+1}")
+                         orig_block_lines = orig_lines[start : end + 1]
+                         # Generate unified diff between the original block and the full proposed content
+                         patch_str = "".join(difflib.unified_diff(
+                             orig_block_lines, prop_lines,
+                             fromfile=f"a/{file_path.name}", tofile=f"b/{file_path.name}",
+                             lineterm='\n' # Use consistent line endings for patch
+                             ))
+
+                         if not patch_str:
+                              logger.warning(f"Generated patch is empty for {file_path.name}. Applying as simple replacement.");
+                              new_lines = orig_lines[:start] + prop_lines + orig_lines[end + 1:];
+                              final_content = "".join(new_lines); success = True
+                         else:
+                              logger.debug(f"Generated Patch:\n{patch_str}")
+                              # Apply the patch to the *full* original content
+                              patched_content = apply_patch(original_full_content, patch_str)
+                              if patched_content is not None:
+                                  final_content = patched_content; success = True
+                              else:
+                                  logger.error(f"Failed to apply patch for {file_path.name}. Check patch content and original file state.");
+                                  QMessageBox.critical(self._widget.window(), "Patch Apply Failed", f"Applying patch failed for '{file_path.name}'.\nCheck logs for details.");
+                                  success = False # Ensure success is false
                 else:
-                    logger.error(f"Cannot apply change {change_id} for '{file_path.name}': Inconsistent apply_type ('{apply_type}') or invalid line data (start={original_start_line}, end={original_end_line}, insert={insertion_line}).")
-                    QMessageBox.warning(self._widget.window(), "Apply Failed", f"Could not apply the change in '{file_path.name}' due to inconsistent data.")
-                    success = False # Ensure success is false
+                    logger.error(f"Cannot apply {change_id}: Inconsistent apply_type ('{apply_type}') or invalid data."); success = False
 
-                # --- Save if successful ---
                 if success and final_content is not None:
+                    # Use WorkspaceManager to handle saving and updating editor state
                     save_success = self._workspace.save_tab_content_directly(file_path, final_content)
                     if save_success:
-                         self._status_bar.update_status(f"Applied changes to: {file_path.name}", 3000)
+                        self._status_bar.update_status(f"Applied changes to: {file_path.name}", 3000)
                     else:
-                         # Workspace manager should emit error, but update status here too
-                         self._status_bar.update_status(f"❌ Failed save to: {file_path.name}", 5000)
-                         success = False # Mark as failed if save fails
-                elif success:
-                     # Should not happen if logic above is correct
-                     logger.error("Apply logic indicated success but final_content is None.")
-                     success = False
+                        self._status_bar.update_status(f"❌ Failed save to: {file_path.name}", 5000); success = False
+                elif success: # Should not happen if logic is correct
+                    logger.error("Internal error: Apply successful but final_content is None."); success = False
 
             except Exception as e:
-                 logger.exception(f"Error applying change {change_id} for {file_path.name}: {e}")
-                 self._status_bar.update_status(f"❌ Error applying to: {file_path.name}", 5000)
-                 success = False
+                logger.exception(f"Error applying change {change_id} for {file_path.name}: {e}");
+                self._status_bar.update_status(f"❌ Error applying to: {file_path.name}", 5000);
+                success = False # Ensure success is false on exception
 
-            # --- Add item to removal list ONLY if successfully applied and saved ---
             if success:
-                processed_ids.add(change_id)
-                item = self._find_item_by_id(change_id)
-                if item:
-                    items_to_remove.append(item)
-                else:
-                     logger.warning(f"Could not find list item for successfully applied change ID {change_id}")
+                 processed_ids.add(change_id);
+                 item = self._find_item_by_id(change_id)
+                 if item:
+                     items_to_remove.append(item)
+                 else:
+                     logger.warning(f"Could not find list item for applied change ID {change_id}")
 
-        # --- Remove successfully processed items from the UI list ---
         if items_to_remove:
             self._widget.remove_items(items_to_remove)
 
-    @Slot(list)
+    @pyqtSlot(list)
     def _handle_reject_request(self, selected_changes_data: List[Dict]):
-        """Handles the request to reject (remove) selected changes from the queue."""
-        logger.info(f"ChangeQueueHandler: Handling reject request for {len(selected_changes_data)} changes.")
-        items_to_remove = []
-        rejected_count = 0
+        logger.info(f"CQH: Handling reject request for {len(selected_changes_data)} changes.")
+        items_to_remove = []; rejected_count = 0
         for change_data in selected_changes_data:
-            change_id = change_data.get('id')
-            if not change_id:
-                 logger.warning("Reject request received for change data with no ID.")
-                 continue
-            item = self._find_item_by_id(change_id)
+            change_id = change_data.get('id');
+            item = self._find_item_by_id(change_id) if change_id else None
             if item:
-                items_to_remove.append(item)
-                rejected_count += 1
-            else:
-                 logger.warning(f"Could not find list item for rejected change ID {change_id}")
-
+                items_to_remove.append(item); rejected_count += 1
+            elif change_id:
+                logger.warning(f"Could not find item for rejected change ID {change_id}")
         if items_to_remove:
-            self._widget.remove_items(items_to_remove)
+            self._widget.remove_items(items_to_remove);
             self._status_bar.update_status(f"Rejected {rejected_count} change(s).", 3000)
 
-    @Slot(str)
+    @pyqtSlot(str)
     def handle_potential_change(self, ai_content_with_markers: str):
-        """
-        Parses AI-generated content containing file markers, attempts to find
-        the corresponding original block using difflib, and adds the change
-        proposal to the ChangeQueueWidget.
-        """
-        logger.debug("ChangeQueueHandler: Received potential change content. Parsing...")
-        # Regex to find blocks marked by ### START/END FILE: ... ###
+        """Parses AI content for change blocks and adds them to the queue."""
+        logger.info("ChangeQueueHandler: Received potential_change_detected pyqtSignal. Parsing content...")
+        # Improved regex to handle optional trailing newline before END FILE
         change_pattern = re.compile(
-            r"### START FILE: (?P<filepath>.*?) ###\n(?P<content>.*?)\n### END FILE: (?P=filepath) ###",
+            r"### START FILE: (?P<filepath>.*?) ###\n" # Start marker and path
+            r"(?P<content>.*?)"                      # Content (non-greedy)
+            r"\n?### END FILE: (?P=filepath) ###",      # Optional newline and End marker
             re.DOTALL | re.MULTILINE
         )
-        matches = change_pattern.finditer(ai_content_with_markers)
-        changes_added = 0
+        matches = list(change_pattern.finditer(ai_content_with_markers)); changes_added = 0
+        logger.debug(f"Found {len(matches)} potential change blocks in received content.")
 
-        for match in matches:
+        for i, match in enumerate(matches):
+            logger.debug(f"--- Processing received block {i+1}/{len(matches)} ---")
             try:
-                relative_path_str = match.group('filepath').strip()
-                proposed_content = match.group('content')
-
+                relative_path_str = match.group('filepath').strip();
+                proposed_content = match.group('content') # Content exactly as captured
                 if not relative_path_str:
-                    logger.warning("Skipping change block with empty file path.")
-                    continue
+                    logger.warning(f"Block {i+1}: Empty file path."); continue
+                logger.debug(f"Block {i+1}: Filepath='{relative_path_str}'")
 
-                # Resolve absolute path and read original content
-                abs_path = self._workspace.project_path / relative_path_str
+                abs_path = self._workspace.project_path / relative_path_str;
                 original_full_content = None
                 if abs_path.is_file():
                     try:
                         original_full_content = abs_path.read_text(encoding='utf-8')
                     except Exception as e:
-                        logger.error(f"Failed to read original file {abs_path}: {e}")
-                        # Optionally add to queue anyway with 'none' confidence? For now, skip.
-                        continue
+                        logger.error(f"Block {i+1}: Failed read original file {abs_path}: {e}"); continue
                 else:
-                    logger.warning(f"File path specified in change block not found: '{abs_path}'. Skipping.")
-                    continue
+                    logger.warning(f"Block {i+1}: File '{abs_path}' not found (considered new).");
+                    original_full_content = "" # Treat as empty for comparison/diff
 
-                # Prepare lines for difflib (without line endings)
-                original_lines = original_full_content.splitlines()
-                proposed_lines = proposed_content.splitlines()
+                original_lines_match = original_full_content.splitlines() # Split for matching function
+                proposed_lines_match = proposed_content.splitlines()
 
-                # --- Use enhanced block finding ---
-                start_line, end_line, confidence = self._find_original_block(original_lines, proposed_lines)
-                # 'confidence' will be 'partial' or 'none'
-                # ---------------------------------
+                start_line, end_line, confidence = self._find_original_block(original_lines_match, proposed_lines_match)
+                original_block_content = None # The specific block content for diff view
 
-                original_block_content = None
-                # Extract the original block content only if a match was found
-                if confidence == 'partial' and start_line != -1 and end_line != -1 and start_line <= end_line:
-                    # Use splitlines(keepends=True) for accurate block content extraction
+                if start_line != -1 and original_full_content: # Only extract block if match found and original exists
+                    # Use keepends=True for accurate block extraction
                     original_lines_with_ends = original_full_content.splitlines(keepends=True)
-                    # Ensure indices are within bounds before slicing
-                    start_idx = max(0, start_line)
-                    end_idx = min(len(original_lines_with_ends), end_line + 1) # +1 for exclusive slice end
-                    if start_idx < end_idx:
-                         original_block_content = "".join(original_lines_with_ends[start_idx : end_idx])
-                         logger.info(f"Found and extracted original block for '{relative_path_str}' lines {start_line+1}-{end_line+1}")
+                    # Clamp end_line to valid index
+                    safe_end_line = min(end_line, len(original_lines_with_ends) - 1)
+                    if start_line <= safe_end_line: # Ensure range is valid
+                         original_block_content = "".join(original_lines_with_ends[start_line : safe_end_line + 1])
+                         logger.info(f"Block {i+1}: Matched original block lines {start_line+1}-{safe_end_line+1} (Confidence: {confidence})")
                     else:
-                         logger.warning(f"Invalid line indices returned for '{relative_path_str}': start={start_line}, end={end_line}. Resetting match.")
-                         start_line, end_line, confidence = -1, -1, 'none' # Reset if indices invalid
-                else:
-                    # If no match found, log it. Confidence is already 'none'.
-                    logger.warning(f"No plausible matching block found for '{relative_path_str}'. Will require manual insertion.")
-                    start_line, end_line = -1, -1 # Ensure lines are -1
+                         logger.warning(f"Block {i+1}: Invalid line range from matcher ({start_line+1}-{end_line+1}). No block extracted.")
+                         confidence = 'none' # Force manual review if range is bad
+                elif start_line == -1:
+                     logger.warning(f"Block {i+1}: No matching block found.")
+                     confidence = 'none' # Ensure confidence reflects no match found
 
-                # --- Add the change proposal to the UI queue ---
+                logger.debug(f"Block {i+1}: Calling widget.add_change for {abs_path.name}...")
                 self._widget.add_change(
                     file_path=abs_path,
-                    proposed_content=proposed_content,
-                    original_full_content=original_full_content,
-                    original_block_content=original_block_content, # Pass the extracted block or None
-                    original_start_line=start_line,             # Pass the found start line or -1
-                    original_end_line=end_line,                 # Pass the found end line or -1
-                    match_confidence=confidence                 # Pass 'partial' or 'none'
+                    proposed_content=proposed_content, # Pass raw proposed content
+                    original_full_content=original_full_content, # Pass full original content
+                    original_block_content=original_block_content, # Pass extracted block or None
+                    original_start_line=start_line,
+                    original_end_line=end_line,
+                    match_confidence=confidence
                 )
                 changes_added += 1
+                logger.debug(f"Block {i+1}: Added change to queue widget.")
             except Exception as e:
-                 # Catch errors during processing of a single block
-                 logger.exception(f"Error processing detected change block: {e}")
+                logger.exception(f"Block {i+1}: Error processing change block: {e}")
+        # --- End Loop ---
 
-        # Update status bar after processing all blocks
         if changes_added > 0:
-             self._status_bar.update_status(f"Detected {changes_added} pending file change(s). Review required.", 5000)
+             logger.info(f"Finished processing potential changes. Added {changes_added} item(s) to queue.")
+             self._status_bar.update_status(f"Detected {changes_added} pending file change(s). Review in queue.", 5000)
         else:
-             logger.debug("No valid file change blocks found in AI content.")
+             logger.debug("Finished processing. No valid change blocks added to queue.")
 
     def _find_item_by_id(self, change_id: str) -> Optional[QListWidgetItem]:
-        """Helper function to find a QListWidgetItem in the change list by its stored ID."""
-        if not self._widget:
-            return None
+        """Finds a QListWidgetItem in the change list by its stored change ID."""
         for i in range(self._widget.change_list.count()):
             item = self._widget.change_list.item(i)
-            if not item: # Should not happen, but check
-                continue
-            data = item.data(Qt.ItemDataRole.UserRole)
-            # Ensure data is a dictionary and has the 'id' key
-            if isinstance(data, dict) and data.get('id') == change_id:
-                return item
-        return None # Not found
+            # Check item is not None before accessing data
+            if item:
+                 data = item.data(Qt.ItemDataRole.UserRole)
+                 if isinstance(data, dict) and data.get('id') == change_id:
+                     return item
+        return None
+
